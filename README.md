@@ -38,19 +38,17 @@ bounded memory *by construction*. The test drives 1,000 versions through a
 
 ## Building
 
-Host (Linux, for logic tests) — dune project, library in `lib/`, suite in
-`test/`, two-process shm demo in `demo/`:
+Host (Linux, for logic tests):
 ```
-make host    # dune build && dune test
-make demo    # producer/consumer over the named shm ring, on this machine
+ocamlopt -c region_stubs.c
+ocamlopt region_stubs.o region.ml ring.ml arena.ml pmap.ml vclock.ml merkle.ml test.ml -o test -cclib -lrt
+./test
 ```
 
 QNX target (SDP with OCaml cross-toolchain, or build under a QNX-hosted
-OCaml): `make target` builds the `qnx` dune cross context — toolchain setup
-and known header friction points are in `docs/CROSS.md`. The stubs alone can
-be smoke-tested against Neutrino headers with:
+OCaml): compile the stubs with `qcc` for your target and link as above:
 ```
-qcc -Vgcc_ntoaarch64le -c lib/region_stubs.c -I$(ocamlopt -where)
+qcc -Vgcc_ntoaarch64le -c region_stubs.c -I$(ocamlopt -where)
 ```
 `shm_open`, `mmap`, `mlock` are POSIX and native on Neutrino; shared objects
 appear under `/dev/shmem/`. The `MsgSendv`/`MsgReceive`/`MsgReply` wrappers
