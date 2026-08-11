@@ -37,3 +37,5 @@ _opam/
 
 # pi agent tooling state
 .pi/
+_build_opt/
+_build_unopt/
