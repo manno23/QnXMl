@@ -115,3 +115,124 @@ Findings:
   their params).
 - Host check still passes:
   `gcc -c lib/region_stubs.c -I<same dir> -o /tmp/region_stubs_host.o`.
+
+## Native cross toolchain: OCaml 5.5.1+dev0-2026-06-19 (Makefile.cross), 2026-08-11
+<!-- appended by cross-compiler worker; append-only -->
+
+Status: **native cross build works end to end** on QNX SDP 8.0 (aarch64le),
+using the upstream `Makefile.cross` / `make crossopt` model — no backport
+needed. The host compiler is the opam `default` switch
+(`ocaml-variants.5.5.1+trunk`, version string `5.5.1+dev0-2026-06-19`, exec
+magic `Caml1999X037`), and the tree is the **5.5 branch** (not trunk!) at the
+matching date: commit `dcc1c6aec` (2026-06-19), whose `build-aux/ocaml_version.m4`
+reads `5.5.1+dev0-2026-06-19` (trunk on that date already read 5.6.0+dev).
+
+### Recipe that worked
+
+```sh
+# 1. tree: ocaml 5.5 branch @ dcc1c6aec (or any commit whose version string
+#    matches the host compiler; configure checks it: "checking if the
+#    installed OCaml compiler can build the cross compiler... yes")
+git clone https://github.com/ocaml/ocaml /tmp/ocaml551
+git -C /tmp/ocaml551 checkout -B qnx-build dcc1c6aec37bd26917a42aef457b194abcdbab79
+
+# 2. configure (in-tree). NOTE the PTHREAD_CFLAGS env var: see patches below.
+./configure --target=aarch64-unknown-nto-qnx8.0.0 \
+  --prefix=$HOME/.opam/default/qnx-sysroot \
+  CC="qcc -Vgcc_ntoaarch64le" AR=ntoaarch64-ar RANLIB=ntoaarch64-ranlib \
+  --disable-shared --disable-dependency-generation \
+  TARGET_BINDIR=/usr/bin TARGET_LIBDIR=/usr/lib/ocaml \
+  PTHREAD_CFLAGS=-D_REENTRANT
+
+# 3. build + install
+make -j8 crossopt          # see "make crossopt parent dies" caveat below
+make installcross          # NOT plain `make install`: installcross adds the
+                           # overrides (OCAMLRUN=ocamlrun, build_ocamldoc=false,
+                           # WITH_DEBUGGER=) that make install sane for cross.
+```
+
+### Patches required (all against the generated ./configure, not the repo)
+
+| file | change | why |
+|------|--------|-----|
+| `configure` | add `aarch64-*-nto-qnx*` case in the native-backend AS_CASE: `has_native_backend=yes; arch=arm64; system=ntoqnx8` (also add `natdynlink=true` in the natdynlink AS_CASE) | upstream only blesses aarch64-linux/freebsd/openbsd/netbsd/darwin; without this `NATIVE_COMPILER=false` and you get a bytecode-only toolchain |
+| `configure` | add a QNX case in the sockets AS_CASE: `cclibs="$cclibs -lsocket"; LIBS="-lsocket $LIBS"` | Neutrino keeps sockets in libsocket, not libc; without it `HAS_SOCKETS` is unset and Unix.socket etc. are dead |
+| `configure` env | pass `PTHREAD_CFLAGS=-D_REENTRANT` at configure time | AX_PTHREAD keys off $host_os (linux) and #errors unless `_REENTRANT` is defined; qcc *ignores* `-pthread` ("unnecessary for qnx") and never defines `_REENTRANT`. The env-var path makes AX_PTHREAD use a plain `pthread_join` link test. Semantically harmless: QNX is always-threaded |
+| `Makefile.config` (generated) | `CPP=qcc -Vgcc_ntoaarch64le -E -P` → drop `-P` | qcc's driver silently produces **empty output** for `-E -P`. The `-P`-stripped output carries `# 1 "..."` line markers, which OCaml's lexer accepts (the tree's own `emit.ml` starts with one). Only affects generated `utils/domainstate.ml{,i}` (and Windows-only `domain_state.inc`) |
+
+Also: `--disable-dependency-generation` is required — qcc's driver does not
+understand gcc's `-MMD/-MT/-MF` and errors with "Can't specify -P, -C, -E, -c
+or -S with -o and have multiple files" (it treats the `-MT`/`-MF` argument as
+a second input file).
+
+### Config results worth knowing (QNX quirks)
+
+- `SYSTEM=ntoqnx8`, `ARCH=arm64`, `NATIVE_COMPILER=true`. `system` only feeds
+  codegen flags: `arm64/arch.ml`'s `top_bits_ignore = (system = "linux")`
+  → false for QNX (correct: no TBI on Neutrino), and `compilenv.ml` uses
+  ELF-style symbol mangling for anything non-Darwin/MinGW (correct).
+- `BYTECCLIBS/NATIVECCLIBS` end with `-lsocket -lm` — every linked executable
+  gets `-lsocket` (matches `lib/dune`'s `case %{system}` which already emitted
+  `()` for non-linux).
+- No `-lrt` anywhere (rt lives in libc on Neutrino). `HAS_STACK_OVERFLOW_DETECTION`
+  unset (no MAP_STACK) — "checking whether mmap supports MAP_STACK... no assumed".
+  `st_atim.tv_nsec` probe found yes, so no stat-nanosecond patch.
+- zstd on the target is too old (<1.4) → compressed compilation artefacts off
+  (fine). `ocamldebug supported` (unix lib builds).
+
+### make crossopt caveat: parent make dies silently at the very last step
+
+Twice (once resuming a partial tree, once from a `make clean` state) the
+top-level `make crossopt` process disappeared **with no error** at the
+transition from the `tools-allopt.opt` sub-make to the final
+CROSSCOMPILERLIBS recipe (log ends at `make[1]: Leaving directory`, no
+`rm -f` echo, no "Error N"). No OOM evidence in dmesg (unprivileged); exit
+status unrecoverable (process gone). The final recipe itself is healthy:
+
+```sh
+# run manually if crossopt's parent dies; it rebuilds compiler-libs for target
+cd /tmp/ocaml551
+source .envrc
+make -n crossopt > /tmp/dry.txt        # lines 121-124 = the final recipe
+sed -n '121,123p' /tmp/dry.txt | bash  # rm -f <all compiler .cmx> + cmxa
+sed -n '124p'      /tmp/dry.txt | bash # make compilerlibs/*.cmxa CAMLC=ocamlc CAMLOPT="./ocamlopt.opt -nostdlib -I ./stdlib"
+```
+
+Do **not** re-run `make crossopt` after the final step: it is not idempotent —
+the earlier `ocamlc.opt ocamlopt.opt` step re-links host binaries against the
+now-aarch64 `compilerlibs/*.a` and fails with `Relocations in generic ELF
+(EM: 183)` / `file in wrong format` (and the failed link deletes the working
+`ocamlc.opt`/`ocamlopt.opt`). The correct end state after the final step is:
+aarch64 `compilerlibs/*.cmxa/.a`, host x86-64 `ocamlc.opt`/`ocamlopt.opt`.
+
+### findlib toolchain (default switch)
+
+`$HOME/.opam/default/lib/findlib.conf.d/qnx.conf`:
+
+```
+path(qnx)        = "/home/jm/.opam/default/qnx-sysroot/lib/ocaml"
+destdir(qnx)     = "/home/jm/.opam/default/qnx-sysroot/lib/ocaml"
+ocamlc(qnx)      = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlc"
+ocamlopt(qnx)    = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlopt"
+ocamlmklib(qnx)  = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlmklib"
+ocamldep(qnx)    = "ocamldep"
+ocamldoc(qnx)    = "ocamldoc"
+```
+
+`ocamlfind -toolchain qnx ocamlopt -config` → `architecture: arm64`,
+`system: ntoqnx8`, `standard_library: /home/jm/.opam/default/qnx-sysroot/lib/ocaml`.
+
+### Verified end-to-end
+
+- `make host` green (dune build + dune test).
+- `make target` (`dune build -x qnx`) green, idempotent.
+- `file _build/default.qnx/demo/producer.exe` →
+  `ELF 64-bit LSB pie executable, ARM aarch64 ... interpreter /usr/lib/ldqnx-64.so.2`.
+- `ntoaarch64-nm` on producer.exe: `U shm_open`, `U mlock`, `U mmap`
+  (libc), `U MsgSendv` (the `__QNXNTO__` IPC path in lib/region_stubs.c is
+  really compiled in). `ntoaarch64-objdump -p` NEEDED: `libsocket.so.4`,
+  `libm.so.3`, `libc.so.6`, `libgcc_s.so.1`.
+- Bytecode side also installs: `bin/aarch64-unknown-nto-qnx-ocamlrun-b106`
+  is aarch64 ELF; `ocamlc` bytecode programs get
+  `#!/usr/bin/ocamlrun-b106` launcher (TARGET_BINDIR=/usr/bin), so on the Pi
+  copy the ocamlrun binary to `/usr/bin/ocamlrun-b106` for bytecode-only use.
