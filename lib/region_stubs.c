@@ -24,10 +24,14 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <time.h>
 
 #ifdef __QNXNTO__
 #include <sys/neutrino.h>
 #include <sys/mman.h>   /* shm_ctl */
+#include <pthread.h>
+#include <sched.h>
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -133,6 +137,32 @@ CAMLprim value qr_fetch_add(value vba, value vidx, value vx)
 }
 
 /* ------------------------------------------------------------------ */
+/* Monotonic clock (SPEC A.9): throughput timing must never use       */
+/* CLOCK_REALTIME, which can jump. CLOCK_MONOTONIC exists on QNX and  */
+/* on Linux/glibc, so this single implementation serves both the      */
+/* target and the host (the host fallback is the same call — no       */
+/* QNX-only guard needed). Returns whole nanoseconds since an         */
+/* arbitrary origin.                                                  */
+/* ------------------------------------------------------------------ */
+
+CAMLprim value qr_monotonic_ns(value vunit)
+{
+    struct timespec ts;
+    (void) vunit;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        caml_failwith("clock_gettime(CLOCK_MONOTONIC)");
+    return caml_copy_int64(((int64_t) ts.tv_sec * 1000000000LL) + ts.tv_nsec);
+}
+
+/* rcvid == 0 <=> pulse. The whole pulse contract hangs off this one
+ * predicate: >0 = message (must reply), ==0 = pulse (never reply),
+ * <0 = error (-errno, do not reply). Pure integer test, no OS calls. */
+CAMLprim value qr_is_pulse(value vrcvid)
+{
+    return Val_bool(Long_val(vrcvid) == 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* QNX IPC: the thinnest possible wrappers.                           */
 /* Deltas travel as word-ranges of the region; MsgSendv points its    */
 /* iov straight at the mapped memory — no serialization, no copy on   */
@@ -162,35 +192,117 @@ CAMLprim value qr_connect_attach(value vpid, value vchid)
  * other domains/threads keep computing while we're SEND/REPLY-blocked. */
 CAMLprim value qr_msg_send(value vcoid, value vba, value voff, value vlen)
 {
+    CAMLparam4(vcoid, vba, voff, vlen);
     int64_t *a = (int64_t *) Caml_ba_data_val(vba);
+    intnat dim = Caml_ba_array_val(vba)->dim[0];
+    intnat off = Long_val(voff), len = Long_val(vlen);
     iov_t siov, riov;
     int64_t reply[8];
     int rc;
-    SETIOV(&siov, a + Long_val(voff), (size_t) Long_val(vlen) * 8);
+    if (off < 0 || len < 0 || off > dim || len > dim - off)
+        caml_failwith("qr_msg_send: range outside region");
+    SETIOV(&siov, a + off, (size_t) len * 8);
     SETIOV(&riov, reply, sizeof reply);
     caml_release_runtime_system();
     rc = MsgSendv(Long_val(vcoid), &siov, 1, &riov, 1);
     caml_acquire_runtime_system();
     if (rc < 0) caml_failwith("MsgSendv");
-    return Val_long(rc);
+    CAMLreturn(Val_long(rc));
 }
 
+/* Blocking receive (SPEC A.3, A.7): returns (rcvid, nbytes) so the OCaml
+ * layer applies the full contract — rcvid > 0 must-reply, == 0 pulse
+ * never-reply, < 0 error — and validates the received length before
+ * trusting the payload (the skill's validate-every-message rule).
+ * The destination range is bound-checked against the region BEFORE the
+ * kernel can copy anything into it. */
 CAMLprim value qr_msg_receive(value vchid, value vba, value voff, value vlen)
 {
+    CAMLparam4(vchid, vba, voff, vlen);
+    CAMLlocal1(res);
     int64_t *a = (int64_t *) Caml_ba_data_val(vba);
+    intnat dim = Caml_ba_array_val(vba)->dim[0];
+    intnat off = Long_val(voff), len = Long_val(vlen);
+    struct _msg_info info;
     int rcvid;
+    if (off < 0 || len < 0 || off > dim || len > dim - off)
+        caml_failwith("qr_msg_receive: range outside region");
     caml_release_runtime_system();
-    rcvid = MsgReceive(Long_val(vchid), a + Long_val(voff),
-                       (size_t) Long_val(vlen) * 8, NULL);
+    rcvid = MsgReceive(Long_val(vchid), a + off, (size_t) len * 8, &info);
     caml_acquire_runtime_system();
-    if (rcvid < 0) caml_failwith("MsgReceive");
-    return Val_long(rcvid);
+    res = caml_alloc_tuple(2);
+    Store_field(res, 0, Val_long(rcvid));
+    Store_field(res, 1, Val_int(rcvid < 0 ? 0 : (intnat) info.msglen));
+    CAMLreturn(res);
 }
 
 CAMLprim value qr_msg_reply(value vrcvid, value vstatus)
 {
     if (MsgReply(Long_val(vrcvid), Long_val(vstatus), NULL, 0) < 0)
         caml_failwith("MsgReply");
+    return Val_unit;
+}
+
+/* Reply with region words [off, off+len) as the body (a 1-word ack for
+ * the delta handshake). rcvid here is always > 0 — replying to a pulse
+ * is a contract violation and the OCaml layer must never route one here. */
+CAMLprim value qr_msg_replyv(value vrcvid, value vstatus, value vba,
+                             value voff, value vlen)
+{
+    CAMLparam5(vrcvid, vstatus, vba, voff, vlen);
+    int64_t *a = (int64_t *) Caml_ba_data_val(vba);
+    intnat dim = Caml_ba_array_val(vba)->dim[0];
+    intnat off = Long_val(voff), len = Long_val(vlen);
+    iov_t riov;
+    int rc;
+    if (off < 0 || len < 0 || off > dim || len > dim - off)
+        caml_failwith("qr_msg_replyv: range outside region");
+    SETIOV(&riov, a + off, (size_t) len * 8);
+    caml_release_runtime_system();
+    rc = MsgReplyv(Long_val(vrcvid), Long_val(vstatus), &riov, 1);
+    caml_acquire_runtime_system();
+    if (rc < 0) caml_failwith("MsgReplyv");
+    CAMLreturn(Val_unit);
+}
+
+/* Fire-and-forget notification (SPEC A.3): code must be in the
+ * _PULSE_CODE_MINAVAIL..MAXAVAIL range (the demo Layout pins it there);
+ * priority -1 = inherit the sender's. Never blocks; EAGAIN only if the
+ * pulse pool is exhausted. */
+CAMLprim value qr_msg_send_pulse(value vcoid, value vcode, value vvalue)
+{
+    CAMLparam3(vcoid, vcode, vvalue);
+    int rc;
+    caml_release_runtime_system();
+    rc = MsgSendPulse(Long_val(vcoid), -1, Int_val(vcode),
+                      (long) Int64_val(vvalue));
+    caml_acquire_runtime_system();
+    if (rc < 0) caml_failwith("MsgSendPulse");
+    CAMLreturn(Val_unit);
+}
+
+/* Real-time posture (SPEC B.1): SCHED_FIFO at the given priority and a
+ * BMP-style single-CPU runmask. Priorities 30/31 stay <= 63 so the
+ * unprivileged qnxuser needs no PROCMGR_AID_PRIORITY. The runmask must
+ * match a cluster defined by the startup program (verify with
+ * `pidin syspage=cluster`); a singleton {cpu} is a valid cluster on the
+ * rpi5 default layout. */
+CAMLprim value qr_sched_fifo(value vprio)
+{
+    struct sched_param p;
+    memset(&p, 0, sizeof p);
+    p.sched_priority = Int_val(vprio);
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &p) != 0)
+        caml_failwith("pthread_setschedparam(SCHED_FIFO)");
+    return Val_unit;
+}
+
+CAMLprim value qr_set_runmask(value vcpu)
+{
+    /* The runmask VALUE is passed as the data pointer (uint64 -> void*). */
+    uintptr_t mask = (uintptr_t) 1 << Long_val(vcpu);
+    if (ThreadCtl(_NTO_TCTL_RUNMASK, (void *) mask) != 0)
+        caml_failwith("ThreadCtl(_NTO_TCTL_RUNMASK)");
     return Val_unit;
 }
 
@@ -202,5 +314,28 @@ CAMLprim value qr_connect_attach(value a, value b){ (void)a;(void)b; return qnx_
 CAMLprim value qr_msg_send(value a, value b, value c, value d){ (void)a;(void)b;(void)c;(void)d; return qnx_only(); }
 CAMLprim value qr_msg_receive(value a, value b, value c, value d){ (void)a;(void)b;(void)c;(void)d; return qnx_only(); }
 CAMLprim value qr_msg_reply(value a, value b){ (void)a;(void)b; return qnx_only(); }
+CAMLprim value qr_msg_replyv(value a, value b, value c, value d, value e){ (void)a;(void)b;(void)c;(void)d;(void)e; return qnx_only(); }
+CAMLprim value qr_msg_send_pulse(value a, value b, value c){ (void)a;(void)b;(void)c; return qnx_only(); }
+
+/* Scheduling/pinning: QNX-only, no-op with a log line on the host so the
+ * demo keeps working under `make demo`. */
+static void qnx_noop(const char *what)
+{
+    fprintf(stderr, "host: %s is QNX-only; no-op on this build\n", what);
+}
+
+CAMLprim value qr_sched_fifo(value vprio)
+{
+    (void) vprio;
+    qnx_noop("SCHED_FIFO priority");
+    return Val_unit;
+}
+
+CAMLprim value qr_set_runmask(value vcpu)
+{
+    (void) vcpu;
+    qnx_noop("CPU runmask pinning");
+    return Val_unit;
+}
 
 #endif
