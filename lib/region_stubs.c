@@ -143,6 +143,7 @@ CAMLprim value qr_fetch_add(value vba, value vidx, value vx)
 
 CAMLprim value qr_channel_create(value vunit)
 {
+    (void) vunit;
     int chid = ChannelCreate(_NTO_CHF_DISCONNECT);
     if (chid < 0) caml_failwith("ChannelCreate");
     return Val_long(chid);

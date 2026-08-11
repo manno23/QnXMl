@@ -79,3 +79,39 @@ The demo is deliberately identical code host and target: shm_open, mmap,
 mlock, and the acq/rel stubs are POSIX/gcc-builtin surface that Neutrino
 provides natively. The QNX-only `MsgSendv` path in `region_stubs.c`
 compiles only in this cross context (`__QNXNTO__`).
+
+## Known friction points (lib/region_stubs.c vs. qcc/gcc_ntoaarch64le)
+<!-- appended by stubs-compile worker; keep this section, append below -->
+
+Verified against QNX SDP 8.0 (`qcc -Vgcc_ntoaarch64le`, aarch64le target)
+with OCaml 5.3.0 headers (`opam exec --switch=ocaml-base-compiler.5.3.0 --
+ocamlopt -where`). The compile only needs the `caml/*.h` headers, not
+linkable OCaml objects, so the host switch's header dir is enough.
+
+Reference command that succeeds:
+
+```sh
+. /home/jm/data/qnx/qnx_custom_builds/qnx800/qnxsdp-env.sh
+qcc -Vgcc_ntoaarch64le -c lib/region_stubs.c \
+  -I"$(opam exec --switch=ocaml-base-compiler.5.3.0 -- ocamlopt -where)" \
+  -o /tmp/region_stubs_qnx.o
+```
+
+Findings:
+
+- **No portability patches were required.** The file compiles cleanly on
+  both qcc/QNX 8.0 and gcc/glibc as written. QNX 8's libc headers provide
+  `MAP_ANONYMOUS`, `shm_open`/`shm_unlink`, `mlock`, `sysconf(_SC_PAGESIZE)`
+  and GCC 12-based `__atomic_*` builtins, so no `#ifdef` beyond the existing
+  `__QNXNTO__` fences was needed.
+- The `__QNXNTO__` branch really is compiled on qcc: the object's undefined
+  symbols include `MsgSendv`, `MsgReceive`, `MsgReply`
+  (`ntoaarch64-nm -u /tmp/region_stubs_qnx.o`).
+- `_GNU_SOURCE` is harmless under QNX headers (ignored) and still needed on
+  glibc for `MAP_ANONYMOUS` under strict modes; left unconditional.
+- One warning fixed for `-Wall -Wextra` hygiene: `qr_channel_create`'s
+  unused `vunit` parameter now has an explicit `(void) vunit;` cast
+  (qcc warned `-Wunused-parameter`; the host `#else` stubs already cast
+  their params).
+- Host check still passes:
+  `gcc -c lib/region_stubs.c -I<same dir> -o /tmp/region_stubs_host.o`.
