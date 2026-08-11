@@ -1,11 +1,19 @@
 (* Bounded single-producer/single-consumer ring over a region slice.
 
    Layout (word indices within the slice):
-     0 : tail  — total slots ever pushed  (written by producer only)
-     1 : head  — total slots ever popped  (written by consumer only)
-     2 : capacity in slots
-     3 : slot width in words
-     4… : capacity * width payload words
+     0   : tail  — total slots ever pushed  (written by producer only)
+     1–7 : padding
+     8   : head  — total slots ever popped  (written by consumer only)
+     9   : capacity in slots (read-only after init)
+     10  : slot width in words (read-only after init)
+     11… : capacity * width payload words
+
+   head sits at word 8, so the two hot counters live on separate 64-byte
+   cache lines (a Cortex-A76 line is 8 int64 words). With the producer
+   and consumer pinned to different cores, a push no longer invalidates
+   the consumer's line and vice versa — the false-sharing fix of SPEC A.5.
+   Words 9 and 10 are written once by [init] and read-only afterwards, so
+   they share head's line harmlessly. [words_needed] accounts for the pad.
 
    Monotone counters (never wrapped) make full/empty tests exact:
    full  = tail - head = capacity, empty = tail = head.
@@ -15,22 +23,25 @@
 
 type t = { s : Region.words; cap : int; width : int }
 
-let tail_ix = 0
-let head_ix = 1
+let tail_ix = 0        (* producer writes this word (cache line 0)       *)
+let head_ix = 8        (* consumer writes this word (cache line 1)       *)
+let cap_ix = 9         (* read-only after init                          *)
+let width_ix = 10      (* read-only after init                          *)
+let header_words = 11  (* 2 hot counters + 7 pad + 2 read-only config    *)
 
-let words_needed ~slots ~width = 4 + (slots * width)
+let words_needed ~slots ~width = header_words + (slots * width)
 
 let init s ~slots ~width =
-  s.{2} <- Int64.of_int slots;
-  s.{3} <- Int64.of_int width;
+  s.{cap_ix} <- Int64.of_int slots;
+  s.{width_ix} <- Int64.of_int width;
   Region.store_rel s tail_ix 0L;
   Region.store_rel s head_ix 0L;
   { s; cap = slots; width }
 
 let attach s =
-  { s; cap = Int64.to_int s.{2}; width = Int64.to_int s.{3} }
+  { s; cap = Int64.to_int s.{cap_ix}; width = Int64.to_int s.{width_ix} }
 
-let slot_base t i = 4 + (i mod t.cap) * t.width
+let slot_base t i = header_words + (i mod t.cap) * t.width
 
 (* [push t payload] copies [width] words in; false if full. *)
 let push t (payload : Region.words) =

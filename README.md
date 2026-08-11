@@ -1,12 +1,14 @@
 # qnx_ocaml — preallocated incremental-compute structures for QNX
 
 Four data structures for a distributed, delta-passing QNX application, in
-OCaml, over one preallocated / page-locked / optionally fixed-address memory
-region. Steady state allocates **zero** OCaml heap: if the region is sized
-right at init, the GC has nothing to collect and never runs during operation.
+OCaml, over one preallocated, pre-faulted shared-memory region (optionally
+mapped at a fixed address; see “Placement” below). Steady state allocates
+**zero** OCaml heap: if the region is sized right at init, the GC has
+nothing to collect and never runs during operation.
 
 ```
-              ONE SLAB (mmap'd, pre-faulted, mlock'd, carved at init)
+             ONE SLAB (mmap'd, pre-faulted at init, carved —
+             mlock kept for Linux parity, a no-op on QNX 8.0)
  ┌──────────┬─────────────┬───────────┬──────────┬───────────────────┐
  │ Ring     │ Arena       │ Vclock    │ Merkle   │ (msg staging,     │
  │ SPSC     │ treap nodes │ per-peer  │ 2N hash  │  scratch...)      │
@@ -20,7 +22,7 @@ right at init, the GC has nothing to collect and never runs during operation.
 
 | module    | what                                            | key guarantee |
 |-----------|--------------------------------------------------|---------------|
-| `Region`  | mmap + pre-fault + mlock, bump-carved slices     | all page faults at init; monotone allocator refuses post-init surprises |
+| `Region`  | mmap + pre-fault, bump-carved slices (mlock shim: no-op on QNX 8.0) | all page faults at init; monotone allocator refuses post-init surprises |
 | `Ring`    | bounded SPSC ring, acq/rel publication           | wait-free push/pop, exact full/empty via monotone counters |
 | `Arena`   | fixed pool, intrusive free list, int handles     | O(1) alloc/free, hard capacity = your preallocation contract |
 | `Pmap`    | persistent treap, sliding version window         | old-version reads intact; O(diff) retirement bounds the pool |
@@ -53,7 +55,9 @@ be smoke-tested against Neutrino headers with:
 qcc -Vgcc_ntoaarch64le -c lib/region_stubs.c -I$(ocamlopt -where)
 ```
 `shm_open`, `mmap`, `mlock` are POSIX and native on Neutrino; shared objects
-appear under `/dev/shmem/`. The `MsgSendv`/`MsgReceive`/`MsgReply` wrappers
+appear under `/dev/shmem/`. (`mlock` is a no-op on QNX 8.0 — all process
+memory is already wired — so the calls are kept for Linux/host parity,
+where locking is real.) The `MsgSendv`/`MsgReceive`/`MsgReply` wrappers
 compile only under `__QNXNTO__` (host builds keep the symbols and fail loudly
 if called). Note `qr_msg_send` points its iov **directly at the region**, so
 a delta send is: write words into your staging slice, one kernel call, no
@@ -61,17 +65,26 @@ serialization layer anywhere.
 
 ## Placement & determinism notes (the "position" part)
 
-- **Fixed addressing**: pass `~addr` to `Region.create`/`attach` for
-  `MAP_FIXED`, giving every process the identical mapping so word indices
-  are absolute cross-process references. Choose the address from your
-  system's memory map (outside default heap/stack/library ranges); on QNX
-  you can additionally use POSIX typed memory (`posix_typed_mem_open`) to
-  draw the backing store from a named physical region defined in your BSP's
-  syspage — swap the `shm_open` in `qr_map` for that fd and nothing else
-  changes.
-- **Locking**: `qr_map` pre-faults every page at init and `mlock`s the
-  range; check the `locked` flag. For belt-and-braces on QNX add
-  `mlockall(MCL_CURRENT)` after all regions are mapped.
+- **Addressing**: word indices are *offsets within each process's own
+  mapping*, not absolute virtual addresses — the library never
+  dereferences a remote index, so each process's Bigarray base can sit
+  anywhere and the indices still agree. Fixed addressing (pass `~addr` to
+  `Region.create`/`attach` for `MAP_FIXED`, giving every process the
+  identical mapping) remains available for features that genuinely need
+  identical placement — a debugger, or a zero-copy hardware path — but it
+  is **deferred for the POC** (default `addr = 0n`): on QNX it costs the
+  `PROCMGR_AID_MAP_FIXED` ability for an unprivileged process, plus the
+  collision risk of picking an address outside heap/stack/libraries, and
+  buys no correctness here. (Typed memory — `posix_typed_mem_open` for a
+  named physical pool — is likewise deferred to a later milestone if a
+  contiguity/DMA requirement appears; the POC uses `shm_open`.)
+- **Locking / no runtime page faults**: on QNX 8.0, `mlock`/`mlockall` are
+  no-ops — all process memory is already wired — so the `locked` flag reads
+  `true` vacuously and asserting it buys nothing. The real guarantee comes
+  from (a) the pre-fault touch loop in `qr_map` (every page is faulted in
+  at init, never at runtime) and (b) QNX's wired-memory model. The `mlock`
+  call and `locked` flag are kept for Linux/host parity, where locking is
+  real; on QNX, log the flag, don't assert it.
 - **GC posture**: steady state should allocate nothing (the structures
   don't; keep your driving code free of closures/boxing in hot paths —
   int64 Bigarray access and int arithmetic compile clean). Then set a

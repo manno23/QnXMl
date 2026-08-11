@@ -66,7 +66,13 @@ let () =
   (* ---- version vectors -------------------------------------------- *)
   print_endline "vclock:";
   let peers = 4 in
-  let c0 = Vclock.init (Region.slice region peers) ~peers ~me:0 in
+  (* SPEC A.5: Vclock pads each per-peer counter onto its own 64-byte cache
+     line, so the resident clock slice is words_needed words, not peers.
+     The incoming delta vector stays DENSE: n words in peer order (the
+     wire format is unchanged by the padding). *)
+  let c0 =
+    Vclock.init (Region.slice region (Vclock.words_needed ~peers)) ~peers ~me:0
+  in
   let incoming = Region.slice region peers in
   Vclock.tick c0; Vclock.tick c0;                (* we are at [2;0;0;0] *)
   for i = 0 to peers - 1 do incoming.{i} <- 0L done;
