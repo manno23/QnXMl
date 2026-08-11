@@ -82,6 +82,14 @@ CAMLprim value qr_map(value vname, value vwords, value vcreate, value vaddr)
                                   1, p, (intnat)(bytes / 8)));
 }
 
+/* Remove a named shared object (QNX: /dev/shmem/name). Idempotent: a
+ * missing name is not an error, so teardown can be unconditional. */
+CAMLprim value qr_unlink(value vname)
+{
+    if (caml_string_length(vname) > 0) shm_unlink(String_val(vname));
+    return Val_unit;
+}
+
 /* Pin the region's pages: no paging at runtime. Returns whether it stuck
  * (needs privilege on Linux; on QNX, memory is not demand-paged to disk in
  * typical configs, but locking still prevents lazy mapping surprises). */
