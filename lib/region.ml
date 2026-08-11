@@ -8,6 +8,7 @@ type words =
 external map_c : string -> int -> bool -> nativeint -> words = "qr_map"
 external lock : words -> bool = "qr_lock"
 external base_addr : words -> nativeint = "qr_base_addr"
+external unlink : string -> unit = "qr_unlink"
 external load_acq : words -> int -> int64 = "qr_load_acq"
 external store_rel : words -> int -> int64 -> unit = "qr_store_rel"
 external fetch_add : words -> int -> int64 -> int64 = "qr_fetch_add"
