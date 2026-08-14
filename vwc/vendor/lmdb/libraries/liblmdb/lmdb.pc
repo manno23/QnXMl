@@ -1,0 +1,11 @@
+prefix=/usr/local
+exec_prefix=/usr/local
+includedir=/usr/local/include
+libdir=/usr/local/lib
+
+Name: lmdb (OpenLDAP)
+Description: OpenLDAP Lightning Memory Mapped Database library
+URL: https://www.openldap.org
+Version: 1.0.0
+Cflags: -pthread 
+Libs: -llmdb -ldl -pthread

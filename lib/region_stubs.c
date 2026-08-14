@@ -74,7 +74,6 @@ CAMLprim value qr_map(value vname, value vwords, value vcreate, value vaddr)
     if (p == MAP_FAILED) caml_failwith("qr_map: mmap");
 
     /* Touch every page now: all faults happen at init, none at runtime. */
-    memset(p, 0, 0);  /* keep contents; pre-fault read/write below */
     {
         volatile char *c = (volatile char *) p;
         long pg = sysconf(_SC_PAGESIZE);
@@ -289,8 +288,8 @@ CAMLprim value qr_msg_send_pulse(value vcoid, value vcode, value vvalue)
  * rpi5 default layout. */
 CAMLprim value qr_sched_fifo(value vprio)
 {
-    struct sched_param p;
-    memset(&p, 0, sizeof p);
+    /* Zero-init via C initializer — not a secret wipe (avoids insecure-memset FP). */
+    struct sched_param p = {0};
     p.sched_priority = Int_val(vprio);
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &p) != 0)
         caml_failwith("pthread_setschedparam(SCHED_FIFO)");

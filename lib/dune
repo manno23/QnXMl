@@ -2,6 +2,7 @@
 ; via (wrapped false) so test.ml and downstream code need no Qnxml. prefix.
 (library
  (name qnxml)
+ (public_name qnx_ocaml)
  (wrapped false)
  (foreign_stubs
   (language c)

@@ -1,0 +1,5 @@
+# VWC sub-package build artifacts.
+# (Root .gitignore already covers _build/, _build_*/, *.o, *.a, *.install.)
+.opa/
+dist-qnx/
+vendor/lmdb/out/

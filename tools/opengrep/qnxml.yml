@@ -7,9 +7,20 @@
 #   - OCaml heap allocation inside "zero-allocation steady state" paths
 #   - 64->63 bit truncation of shared monotone counters
 #   - C-stub hazards: MAP_FIXED, discarded MsgSendv replies, EAGAIN
-#     pulses, blocking syscalls holding the runtime lock, unchecked shifts
+#     pulses, blocking syscalls holding the runtime lock, unchecked shifts,
+#     missing munmap, mapping-size overflow, caml_failwith discarding errno
+#   - stale-session protocol: O_CREAT without O_EXCL, attach without fstat,
+#     unlink-then-recreate fixed names, ConnectAttach that hides ESRCH
 #
-# Run:  opengrep scan --no-git-ignore --config tools/opengrep/qnxml.yml lib demo test
+# The "zero OCaml heap allocation in steady state" claim is overstated:
+# Int64.of_int / caml_copy_int64 / Int64 arithmetic box on hot paths (see
+# boxing rules). Confirm with OCAMLRUNPARAM='v=0x400' (or GC alarms) and
+# watch minor collections under load.
+#
+# Run:
+#   make opengrep            # scan + JSON/SARIF under tools/opengrep/
+#   make opengrep-test       # positive/negative fixtures next to this file
+#   opengrep test tools/opengrep/
 
 rules:
 
@@ -34,24 +45,35 @@ rules:
     paths:
       include:
         - "**/merkle.ml"
+        - "**/qnxml.ml"
     message: >
-      Plain (non-atomic) store to a shared region word. Merkle publishes
-      the root last on update, but with no release store and no acquire on
-      the reader side, a cross-process reader can observe the new root with
-      stale children (or a torn path). If the tree is ever read while
-      another process updates it, use store_rel on the root and load_acq
-      on reads, or document a quiescence requirement.
-    pattern-regex: '\.s\.\{[^}]+\}\s*<-'
+      Plain (non-atomic) store on the Merkle update path. Initialization
+      stores are expected and excluded; update publishes leaf→root with no
+      release store and no acquire on the reader side, so a cross-process
+      reader can observe the new root with stale children (or a torn path).
+      Use store_rel on the root and load_acq on reads, or document a
+      quiescence requirement.
+    patterns:
+      - pattern-regex: '\.s\.\{[^}]+\}\s*<-'
+      - pattern-inside: |
+          let update ... =
+            ...
 
   - id: qnxml-plain-read-of-shared-config
     languages: [ocaml]
     severity: WARNING
     message: >
-      Plain (non-acquire) read of a shared region word. Configuration
-      words written at init are only safe to read after an explicit
-      handshake (magic word / IPC) establishes happens-before. If this
-      read can run concurrently with the writer's init, use Region.load_acq.
-    pattern: Int64.to_int $S.{$IX}
+      Plain (non-acquire) read of a shared region word inside attach/config.
+      Configuration words written at init are only safe to read after an
+      explicit handshake (magic word / IPC) establishes happens-before.
+      Single-owner Arena free-list walks are out of scope for this rule —
+      they are not cross-process publication. Use Region.load_acq when the
+      writer may still be initializing.
+    patterns:
+      - pattern: Int64.to_int $S.{$IX}
+      - pattern-inside: |
+          let attach ... =
+            ...
 
   - id: qnxml-shared-counter-truncation
     languages: [ocaml]
@@ -64,20 +86,78 @@ rules:
       in the docs must be qualified to 63 bits on the OCaml side.
     pattern: Int64.to_int (Region.load_acq $S $IX)
 
-  - id: qnxml-int64-boxing-in-steady-state
+  - id: qnxml-int64-boxing-in-hot-path
+    languages: [ocaml]
+    severity: WARNING
+    paths:
+      include:
+        - "lib/*"
+        - "demo/*"
+        - "**/qnxml.ml"
+    message: >
+      Int64.of_int allocates a boxed int64 on the OCaml heap outside
+      init/create. On push/pop/tick/free/seti (and demo steady-state loops)
+      this contradicts the "zero OCaml heap allocation in steady state"
+      contract. Keep boxing on init-only paths, use [@@unboxed] externals,
+      or accept and document the minor-allocation rate.
+    patterns:
+      - pattern: Int64.of_int $X
+      - pattern-not-inside: |
+          let init ... =
+            ...
+      - pattern-not-inside: |
+          let create ... =
+            ...
+
+  - id: qnxml-int64-boxing-in-init
     languages: [ocaml]
     severity: INFO
     paths:
       include:
         - "lib/*"
         - "demo/*"
+        - "**/qnxml.ml"
     message: >
-      Int64.of_int allocates a boxed int64 on the OCaml heap. Inside
-      push/pop/tick hot paths this contradicts the "zero OCaml heap
-      allocation in steady state" contract (each boxing is a GC-visible
-      minor allocation). Audit: keep boxing to init-only paths, or accept
-      and document the minor-allocation rate.
-    pattern: Int64.of_int $X
+      Int64.of_int boxes on an init/create path. Expected for one-time
+      region setup (ring cap/width, vclock peer count, arena free-list
+      chain). Not a steady-state concern; tracked separately from hot-path
+      boxing so init noise does not hide push/pop allocations.
+    patterns:
+      - pattern: Int64.of_int $X
+      - pattern-either:
+          - pattern-inside: |
+              let init ... =
+                ...
+          - pattern-inside: |
+              let create ... =
+                ...
+
+  - id: qnxml-int64-arith-hot-path
+    languages: [ocaml]
+    severity: INFO
+    paths:
+      include:
+        - "lib/*"
+        - "demo/*"
+        - "**/qnxml.ml"
+    message: >
+      Int64 arithmetic returns a freshly boxed int64. On hot paths (ring
+      push/pop staging, merkle mix/update, demo tight loops) each add/mul/
+      sub/logxor is a minor allocation on top of any of_int boxing. Prefer
+      unboxed int64 externals or keep heavy mixers off the steady-state
+      path if the zero-allocation claim must hold strictly.
+    patterns:
+      - pattern-either:
+          - pattern: Int64.add $A $B
+          - pattern: Int64.mul $A $B
+          - pattern: Int64.sub $A $B
+          - pattern: Int64.logxor $A $B
+      - pattern-not-inside: |
+          let init ... =
+            ...
+      - pattern-not-inside: |
+          let create ... =
+            ...
 
   - id: qnxml-pmap-copy-log-heap-alloc
     languages: [ocaml]
@@ -85,6 +165,7 @@ rules:
     paths:
       include:
         - "**/pmap.ml"
+        - "**/qnxml.ml"
     message: >
       The copy log is an OCaml heap list consed per copied node, and the
       version window is a heap list too. Every Pmap.set therefore allocates
@@ -99,6 +180,7 @@ rules:
     paths:
       include:
         - "**/ring.ml"
+        - "**/qnxml.ml"
     message: >
       Modulo by t.cap: Ring.attach reads cap from the region with no
       validation, so attaching to a not-yet-initialized slice gives cap=0
@@ -112,6 +194,7 @@ rules:
     paths:
       include:
         - "lib/*"
+        - "**/qnxml.ml"
     message: >
       failwith reachable at runtime: inventory the crash surface for
       steady-state operation. Region/Arena exhaustion are by design
@@ -174,13 +257,14 @@ rules:
 
   - id: qnxml-ftruncate-resizes-shared-object
     languages: [c]
-    severity: INFO
+    severity: ERROR
     message: >
       ftruncate on a shm_open fd with O_CREAT but without O_EXCL: if the
       shared object already exists (e.g. a previous run or another
       participant sized it differently), this silently resizes shared state
-      other processes may be using. Consider O_EXCL for create, or fstat
-      and verify the existing size first.
+      other processes may be using — stale/partial mappings, SIGBUS, or
+      silent data loss. Use O_EXCL for create, or fstat and verify the
+      existing size before truncating.
     pattern: ftruncate($FD, $SIZE)
 
   - id: qnxml-unchecked-shift-amount
@@ -190,3 +274,210 @@ rules:
       Shift amount comes straight from an OCaml value with no range check;
       cpu >= 64 is undefined behavior. Clamp or validate before shifting.
     pattern: (uintptr_t) 1 << Long_val($V)
+
+  - id: qnxml-caml-copy-int64-hot-path
+    languages: [c]
+    severity: WARNING
+    message: >
+      caml_copy_int64 boxes an int64 on the OCaml heap. In load_acq /
+      fetch_add this fires on every ring push/pop and vclock tick — the C
+      side of the "zero OCaml heap allocation in steady state" hole. Expose
+      [@@unboxed] externals (int64_t in/out) so the stub returns a raw
+      integer without allocating.
+    patterns:
+      - pattern: caml_copy_int64($X)
+      - pattern-either:
+          - pattern-inside: |
+              static value qr_load_acq(...) {
+                ...
+              }
+          - pattern-inside: |
+              static value qr_fetch_add(...) {
+                ...
+              }
+          - pattern-inside: |
+              value qr_load_acq(...) {
+                ...
+              }
+          - pattern-inside: |
+              value qr_fetch_add(...) {
+                ...
+              }
+
+  - id: qnxml-mmap-without-munmap
+    languages: [c]
+    severity: WARNING
+    message: >
+      mmap without a matching munmap in the same function. On the success
+      path the Bigarray may own the mapping for the process lifetime, but
+      any failure after a successful mmap (or a missing custom finalizer)
+      leaks the virtual mapping. Pair error paths with munmap, and ensure
+      GC finalization calls munmap when the region is released.
+    patterns:
+      - pattern: $P = mmap(...);
+      - pattern-not-inside: |
+          $P = mmap(...);
+          ...
+          munmap($P, ...);
+
+  - id: qnxml-map-size-overflow
+    languages: [c]
+    severity: ERROR
+    message: >
+      Mapping byte length is computed as (size_t)Long_val(words) * 8 without
+      an overflow check. A large words count wraps size_t, under-allocates
+      the mmap, and later region stores walk off the mapping (SIGBUS /
+      corruption). Reject words that would overflow or use a checked
+      multiply before mmap/ftruncate.
+    pattern-either:
+      - pattern: (size_t) Long_val($V) * $N
+      - pattern: (size_t)(Long_val($V) * $N)
+
+  - id: qnxml-failwith-discards-errno
+    languages: [c]
+    severity: WARNING
+    message: >
+      caml_failwith with a fixed string discards errno (and QNX's error
+      detail). Callers see "MsgSendv" / "shm_open" with no strerror, which
+      makes EAGAIN vs EINTR vs EBADF indistinguishable — the pulse EAGAIN
+      crash is the sharp edge of this pattern. Prefer caml_uerror /
+      caml_unix_error, or include strerror(errno) in the message.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if ($CALL < 0) caml_failwith($MSG);
+          - pattern: |
+              if ($CALL != 0) caml_failwith($MSG);
+          - pattern: |
+              if ($CALL < 0)
+                  caml_failwith($MSG);
+          - pattern: |
+              if ($CALL != 0)
+                  caml_failwith($MSG);
+          - pattern: |
+              if ($CALL == MAP_FAILED) caml_failwith($MSG);
+      # Dedicated rules cover these two strings with richer guidance.
+      - pattern-not: |
+          if ($CALL < 0) caml_failwith("ConnectAttach");
+      - pattern-not: |
+          if ($CALL < 0) caml_failwith("MsgSendPulse");
+
+  - id: qnxml-zero-length-memset
+    languages: [c]
+    severity: INFO
+    message: >
+      memset with a zero length is a no-op (and trips generic
+      "insecure memset" rules). Delete it; use a real length, or the
+      explicit pre-fault loop already present after mmap.
+    pattern: memset($P, $V, 0);
+
+  # ------------------------------------------------------------------
+  # Stale-session / multi-generation protocol
+  # ------------------------------------------------------------------
+  #
+  # Unconditional unlink + recreate under a fixed name, O_CREAT without
+  # O_EXCL, attach without fstat, and ConnectAttach that only failwith's
+  # all combine into disconnected generations: old consumers keep the old
+  # mapping while a new producer binds the same name to a new object.
+  # Layout version + session generation + READY-last publication + unique
+  # names are the protocol fix; these rules flag the unsafe building blocks.
+
+  - id: qnxml-shm-create-without-excl
+    languages: [c]
+    severity: ERROR
+    message: >
+      shm_open create path uses O_CREAT without O_EXCL. A second creator
+      (or a retry after a crash) opens the existing object and may ftruncate
+      it under live peers — two logical sessions share one name. Require
+      O_CREAT|O_EXCL for exclusive create, or open existing read-only and
+      validate generation/size before joining.
+    patterns:
+      - pattern-either:
+          - pattern: "O_RDWR | (Bool_val($V) ? O_CREAT : 0)"
+          - pattern: "O_RDWR | O_CREAT"
+          - pattern: "O_CREAT | O_RDWR"
+      - pattern-not-inside: "O_RDWR | O_CREAT | O_EXCL"
+      - pattern-not-inside: "O_CREAT | O_EXCL | O_RDWR"
+      - pattern-not-inside: "O_RDWR | O_EXCL | O_CREAT"
+      - pattern-not-inside: "O_CREAT | O_RDWR | O_EXCL"
+
+  - id: qnxml-attach-without-fstat-size
+    languages: [c]
+    severity: ERROR
+    message: >
+      shm_open → mmap without an fstat size check between them. If the
+      creator sized the object differently (code skew, partial create, or a
+      new generation under the same name), mmap succeeds and the first touch
+      past st_size delivers SIGBUS. fstat and require st_size >= expected
+      bytes before mapping; on mismatch unmap/retry or fail cleanly.
+    patterns:
+      - pattern: mmap(...)
+      - pattern-either:
+          - pattern-inside: |
+              static value $F(...) {
+                ...
+                shm_open(...);
+                ...
+                mmap(...);
+                ...
+              }
+          - pattern-inside: |
+              $RET $F(...) {
+                ...
+                shm_open(...);
+                ...
+                mmap(...);
+                ...
+              }
+      - pattern-not-inside: |
+          $RET $F(...) {
+            ...
+            shm_open(...);
+            ...
+            fstat(...);
+            ...
+            mmap(...);
+            ...
+          }
+      - pattern-not-inside: |
+          static value $F(...) {
+            ...
+            shm_open(...);
+            ...
+            fstat(...);
+            ...
+            mmap(...);
+            ...
+          }
+
+  - id: qnxml-connect-attach-discards-errno
+    languages: [c]
+    severity: WARNING
+    message: >
+      ConnectAttach failure is reported only as caml_failwith("ConnectAttach"),
+      discarding errno. ESRCH/EINVAL here is the stale-session signal (dead
+      producer pid/chid published in a previous generation). Return the error
+      to OCaml so the caller can drop the mapping, munmap, and retry/remap
+      against a fresh READY publication instead of crashing the joiner.
+    pattern: |
+      if ($COID < 0) caml_failwith("ConnectAttach");
+
+  - id: qnxml-unlink-before-create-same-name
+    languages: [ocaml]
+    severity: ERROR
+    paths:
+      include:
+        - "demo/*"
+        - "lib/*"
+        - "**/qnxml.ml"
+    message: >
+      Region.unlink immediately followed by Region.create. Unconditional
+      unlink of a well-known name creates two disconnected generations:
+      old consumers retain the old mapping while the new producer binds a
+      new object under the same path. Prefer unique session names (name +
+      generation), O_CREAT|O_EXCL, layout version checks, publish READY
+      last, and munmap before retry; never unlink-then-recreate while peers
+      may still be mapped.
+    patterns:
+      - pattern: Region.unlink $NAME
+      - pattern-regex: 'Region\.unlink[\s\S]{0,200}?Region\.create'

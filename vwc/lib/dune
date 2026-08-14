@@ -1,0 +1,21 @@
+; VWC-OCaml migrated into QnXMl as the vwc_ocaml sub-package.
+;
+; Current VWC content is spec-driven interface definitions only (.mli files,
+; traceable to VWC-SRS-001 via docs/TRACE.md):
+;   lib/core/  opref, region, writelog, filetable, grant
+;   lib/ipc/   ipc
+; They are compiled as modules-without-implementation (cmi-only) so the build
+; stays green while the implementations (journal, store, manager, client and
+; the vwc_stubs C shim referenced by the original VWC-OCaml dune file) land.
+; The migrated library depends on qnx_ocaml (the QnXMl substrate) and unix.
+
+(include_subdirs unqualified)
+
+(library
+ (name vwc_ocaml)
+ (public_name vwc_ocaml)
+ (libraries qnx_ocaml unix)
+ (modules_without_implementation
+  ("opref" "region" "writelog" "filetable" "grant" "ipc"))
+ (flags
+  (:standard -w +a-4-40-42-44-45-70)))
