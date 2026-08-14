@@ -1,0 +1,320 @@
+opengrep scan --no-git-ignore --exclude 'region_stubs.c' \
+  --config /home/jm/data/qnx/.opengrep-rules/semgrep-rules/ocaml \
+  --config /home/jm/data/qnx/.opengrep-rules/semgrep-rules/c \
+  --config tools/opengrep/qnxml.yml \
+  lib demo test /tmp/qnxml_stubs_scan.c
+
+┌──────────────┐
+│ Opengrep CLI │
+└──────────────┘
+
+
+Scanning 15 files with 64 Code rules:
+
+  CODE RULES
+
+  Language   Rules   Files          Origin   Rules
+ ──────────────────────────        ────────────────
+  ocaml         42       9          Custom      64
+  c             22       1
+
+
+  PROGRESS
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+
+
+┌──────────────────┐
+│ 43 Code Findings │
+└──────────────────┘
+
+    /tmp/qnxml_stubs_scan.c
+     ❱ tools.opengrep.qnxml-ftruncate-resizes-shared-object
+          ftruncate on a shm_open fd with O_CREAT but without O_EXCL: if the shared object already exists
+          (e.g. a previous run or another participant sized it differently), this silently resizes shared
+          state other processes may be using. Consider O_EXCL for create, or fstat and verify the existing
+          size first.
+
+           65┆ if (Bool_val(vcreate) && ftruncate(fd, (off_t) bytes) != 0) {
+
+    ❯❱ tools.opengrep.qnxml-map-fixed-silent-overwrite
+          MAP_FIXED silently replaces any existing mapping overlapping the requested range — a wrong hint
+          address can destroy the process's own address space with no error. Prefer MAP_FIXED_NOREPLACE (check
+          EEXIST) or verify the range is free before mapping.
+
+           70┆ if (hint != NULL) flags |= MAP_FIXED;
+
+    ❯❱ home.jm.data.qnx..opengrep-rules.semgrep-rules.c.lang.security.insecure-use-memset
+          When handling sensitive information in a buffer, it's important to ensure  that the data is securely
+          erased before the buffer is deleted or reused.  While `memset()` is commonly used for this purpose,
+          it can leave sensitive  information behind due to compiler optimizations or other factors.  To avoid
+          this potential vulnerability, it's recommended to use the  `memset_s()` function instead.
+          `memset_s()` is a standardized function  that securely overwrites the memory with a specified value,
+          making it more  difficult for an attacker to recover any sensitive data that was stored in  the
+          buffer. By using `memset_s()` instead of `memset()`, you can help to  ensure that your application
+          is more secure and less vulnerable to exploits  that rely on residual data in memory.
+
+           ▶▶┆ Autofix ▶ memset_s(p, 0, 0)
+           77┆ memset(p, 0, 0);  /* keep contents; pre-fault read/write below */
+
+    ❯❱ tools.opengrep.qnxml-msgsendv-reply-discarded
+          MsgSendv collects the reply into a stack-local buffer that is never read — the reply payload is
+          silently discarded (the comment suggests a caller buffer). Either return the reply words to OCaml or
+          shrink the reply iov to zero and document that sends are ack-only.
+
+          207┆ rc = MsgSendv(Long_val(vcoid), &siov, 1, &riov, 1);
+
+    ❯❱ tools.opengrep.qnxml-pulse-eagain-crashes-producer
+          MsgSendPulse fails with EAGAIN when the receiver's pulse pool is exhausted; failing hard turns
+          backpressure (producer spin-waiting on a full ring, pulsing every retry) into a producer crash.
+          Return the error to OCaml and let the caller rate-limit or coalesce wakeups.
+
+          280┆ if (rc < 0) caml_failwith("MsgSendPulse");
+
+    ❯❱ home.jm.data.qnx..opengrep-rules.semgrep-rules.c.lang.security.insecure-use-memset
+          When handling sensitive information in a buffer, it's important to ensure  that the data is securely
+          erased before the buffer is deleted or reused.  While `memset()` is commonly used for this purpose,
+          it can leave sensitive  information behind due to compiler optimizations or other factors.  To avoid
+          this potential vulnerability, it's recommended to use the  `memset_s()` function instead.
+          `memset_s()` is a standardized function  that securely overwrites the memory with a specified value,
+          making it more  difficult for an attacker to recover any sensitive data that was stored in  the
+          buffer. By using `memset_s()` instead of `memset()`, you can help to  ensure that your application
+          is more secure and less vulnerable to exploits  that rely on residual data in memory.
+
+           ▶▶┆ Autofix ▶ memset_s(&p, 0, sizeof p)
+          293┆ memset(&p, 0, sizeof p);
+
+    ❯❱ tools.opengrep.qnxml-unchecked-shift-amount
+          Shift amount comes straight from an OCaml value with no range check; cpu >= 64 is undefined
+          behavior. Clamp or validate before shifting.
+
+          303┆ uintptr_t mask = (uintptr_t) 1 << Long_val(vcpu);
+
+    demo/consumer.ml
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           65┆ Region.store_rel hdr 4 (Int64.of_int chid);
+            ⋮┆----------------------------------------
+           66┆ Region.store_rel hdr 3 (Int64.of_int (Unix.getpid ()));
+
+    ❯❱ tools.opengrep.qnxml-shared-counter-truncation
+          A shared 64-bit counter is truncated to a 63-bit OCaml int. The monotone-never-wrap invariant holds
+          for int64, but arithmetic after to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+          raises. Fine for realistic lifetimes, but the "never wrapped" claim in the docs must be qualified to
+          63 bits on the OCaml side.
+
+           68┆ Region.connect_attach (Int64.to_int (Region.load_acq hdr 1))
+            ⋮┆----------------------------------------
+           69┆ (Int64.to_int (Region.load_acq hdr 2))
+
+    demo/producer.ml
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           46┆ Region.store_rel hdr 2 (Int64.of_int chid);
+            ⋮┆----------------------------------------
+           47┆ Region.store_rel hdr 1 (Int64.of_int (Unix.getpid ()));
+
+    ❯❱ tools.opengrep.qnxml-shared-counter-truncation
+          A shared 64-bit counter is truncated to a 63-bit OCaml int. The monotone-never-wrap invariant holds
+          for int64, but arithmetic after to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+          raises. Fine for realistic lifetimes, but the "never wrapped" claim in the docs must be qualified to
+          63 bits on the OCaml side.
+
+           54┆ Region.connect_attach (Int64.to_int (Region.load_acq hdr 3))
+            ⋮┆----------------------------------------
+           55┆ (Int64.to_int (Region.load_acq hdr 4))
+
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           70┆ msg.{0} <- Int64.of_int seq;
+            ⋮┆----------------------------------------
+           71┆ msg.{1} <- Int64.mul (Int64.of_int seq) 3L;
+
+    lib/arena.ml
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           21┆ s.{i * node_words} <- Int64.of_int (if i = capacity - 1 then nil else i + 1)
+
+     ❱ tools.opengrep.qnxml-failwith-runtime-surface
+          failwith reachable at runtime: inventory the crash surface for steady-state operation. Region/Arena
+          exhaustion are by design (preallocation contract violations), but a SCHED_FIFO/IPC failure path
+          taking the process down may deserve a degraded-mode fallback.
+
+           27┆ if i = nil then failwith "arena exhausted: capacity was the preallocation contract";
+
+    ❯❱ tools.opengrep.qnxml-plain-read-of-shared-config
+          Plain (non-acquire) read of a shared region word. Configuration words written at init are only safe
+          to read after an explicit handshake (magic word / IPC) establishes happens-before. If this read can
+          run concurrently with the writer's init, use Region.load_acq.
+
+           28┆ t.free_head <- Int64.to_int t.s.{i * t.node_words};
+
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           33┆ t.s.{i * t.node_words} <- Int64.of_int t.free_head;
+            ⋮┆----------------------------------------
+           41┆ let seti t i f v = set t i f (Int64.of_int v)
+
+    lib/merkle.ml
+    ❯❱ tools.opengrep.qnxml-plain-store-to-shared-word
+          Plain (non-atomic) store to a shared region word. Merkle publishes the root last on update, but with
+          no release store and no acquire on the reader side, a cross-process reader can observe the new root
+          with stale children (or a torn path). If the tree is ever read while another process updates it, use
+          store_rel on the root and load_acq on reads, or document a quiescence requirement.
+
+           39┆ t.s.{!i} <- mix value;
+            ⋮┆----------------------------------------
+           42┆ t.s.{!i} <- mix2 t.s.{2 * !i} t.s.{(2 * !i) + 1}
+
+    lib/pmap.ml
+     ❱ tools.opengrep.qnxml-pmap-copy-log-heap-alloc
+          The copy log is an OCaml heap list consed per copied node, and the version window is a heap list
+          too. Every Pmap.set therefore allocates on the OCaml heap in steady state — the strongest form of
+          the "never allocate" claim does not hold for Pmap. Either scope the claim to
+          Ring/Arena/Vclock/Merkle, or move the log into the region.
+
+           63┆ log := i :: !log;
+
+     ❱ tools.opengrep.qnxml-failwith-runtime-surface
+          failwith reachable at runtime: inventory the crash surface for steady-state operation. Region/Arena
+          exhaustion are by design (preallocation contract violations), but a SCHED_FIFO/IPC failure path
+          taking the process down may deserve a degraded-mode fallback.
+
+          134┆ with Not_found -> failwith "version retired")
+
+    lib/region.ml
+     ❱ tools.opengrep.qnxml-failwith-runtime-surface
+          failwith reachable at runtime: inventory the crash surface for steady-state operation. Region/Arena
+          exhaustion are by design (preallocation contract violations), but a SCHED_FIFO/IPC failure path
+          taking the process down may deserve a degraded-mode fallback.
+
+           65┆ failwith "region exhausted: size the slab before steady state";
+
+    lib/ring.ml
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           35┆ s.{cap_ix} <- Int64.of_int slots;
+            ⋮┆----------------------------------------
+           36┆ s.{width_ix} <- Int64.of_int width;
+
+    ❯❱ tools.opengrep.qnxml-plain-read-of-shared-config
+          Plain (non-acquire) read of a shared region word. Configuration words written at init are only safe
+          to read after an explicit handshake (magic word / IPC) establishes happens-before. If this read can
+          run concurrently with the writer's init, use Region.load_acq.
+
+           42┆ { s; cap = Int64.to_int s.{cap_ix}; width = Int64.to_int s.{width_ix} }
+            ⋮┆----------------------------------------
+           42┆ { s; cap = Int64.to_int s.{cap_ix}; width = Int64.to_int s.{width_ix} }
+
+    ❯❱ tools.opengrep.qnxml-mod-capacity-without-zero-guard
+          Modulo by t.cap: Ring.attach reads cap from the region with no validation, so attaching to a not-
+          yet-initialized slice gives cap=0 and raises Division_by_zero at runtime instead of failing at
+          attach. Validate cap > 0 (and width > 0) in attach.
+
+           44┆ let slot_base t i = header_words + (i mod t.cap) * t.width
+
+    ❯❱ tools.opengrep.qnxml-shared-counter-truncation
+          A shared 64-bit counter is truncated to a 63-bit OCaml int. The monotone-never-wrap invariant holds
+          for int64, but arithmetic after to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+          raises. Fine for realistic lifetimes, but the "never wrapped" claim in the docs must be qualified to
+          63 bits on the OCaml side.
+
+           48┆ let tail = Int64.to_int (Region.load_acq t.s tail_ix) in
+            ⋮┆----------------------------------------
+           49┆ let head = Int64.to_int (Region.load_acq t.s head_ix) in
+
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           54┆ Region.store_rel t.s tail_ix (Int64.of_int (tail + 1));
+
+    ❯❱ tools.opengrep.qnxml-shared-counter-truncation
+          A shared 64-bit counter is truncated to a 63-bit OCaml int. The monotone-never-wrap invariant holds
+          for int64, but arithmetic after to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+          raises. Fine for realistic lifetimes, but the "never wrapped" claim in the docs must be qualified to
+          63 bits on the OCaml side.
+
+           60┆ let head = Int64.to_int (Region.load_acq t.s head_ix) in
+            ⋮┆----------------------------------------
+           61┆ let tail = Int64.to_int (Region.load_acq t.s tail_ix) in
+
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           66┆ Region.store_rel t.s head_ix (Int64.of_int (head + 1));
+
+    ❯❱ tools.opengrep.qnxml-shared-counter-truncation
+          A shared 64-bit counter is truncated to a 63-bit OCaml int. The monotone-never-wrap invariant holds
+          for int64, but arithmetic after to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+          raises. Fine for realistic lifetimes, but the "never wrapped" claim in the docs must be qualified to
+          63 bits on the OCaml side.
+
+           71┆ Int64.to_int (Region.load_acq t.s tail_ix)
+            ⋮┆----------------------------------------
+           72┆ - Int64.to_int (Region.load_acq t.s head_ix)
+
+    lib/vclock.ml
+     ❱ tools.opengrep.qnxml-int64-boxing-in-steady-state
+          Int64.of_int allocates a boxed int64 on the OCaml heap. Inside push/pop/tick hot paths this
+          contradicts the "zero OCaml heap allocation in steady state" contract (each boxing is a GC-visible
+          minor allocation). Audit: keep boxing to init-only paths, or accept and document the minor-
+          allocation rate.
+
+           38┆ s.{n_ix} <- Int64.of_int peers;
+
+    ❯❱ tools.opengrep.qnxml-plain-read-of-shared-config
+          Plain (non-acquire) read of a shared region word. Configuration words written at init are only safe
+          to read after an explicit handshake (magic word / IPC) establishes happens-before. If this read can
+          run concurrently with the writer's init, use Region.load_acq.
+
+           42┆ let attach s ~me = { s; me; n = Int64.to_int s.{n_ix} }
+
+   ❯❯❱ tools.opengrep.qnxml-check-then-store-on-shared-word
+          Non-atomic check-then-store on a shared region word. Another process can modify the word between the
+          read and the store (lost update or value inflation). Vclock.merge races this way against the owning
+          peer's atomic fetch_add tick. Use a CAS loop or an atomic max primitive; a bare load + conditional
+          store_rel is not atomic RMW.
+
+           65┆ if b > a then Region.store_rel t.s (component_ix i) b
+
+
+
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+Some files were skipped or only partially analyzed.
+  Scan skipped: 1 files matching --exclude patterns, 1 files matching .semgrepignore patterns
+  For a full list of skipped files, run opengrep with the --verbose flag.
+
+Ran 64 rules on 10 files: 43 findings.
+
