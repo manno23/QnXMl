@@ -1,0 +1,66 @@
+
+$) ssh root@192.168.208.81
+# /usr/bin/consumer
+consumer: attached to /qnxml_demo (mlock=true)
+Fatal error: exception Failure("ConnectAttach")
+# /usr/bin/producer
+producer: region /qnxml_demo ready (272 words, mlock=true), sending 100000
+producer: channel 1 (pid 1814554), pulse control plane
+
+# /usr/bin/producer &
+[1] 1822746
+# producer: region /qnxml_demo ready (272 words, mlock=true), sending 100000
+producer: channel 1 (pid 1822746), pulse control plane
+/usr/bin/consumer
+consumer: attached to /qnxml_demo (mlock=true)
+consumer: control channel 1 (pid 1826843), connected (coid 1073741825)
+producer: connected to consumer channel (coid 1073741825)
+producer: consumer status (16 bytes), acking
+consumer: status sent, ack received (0 reply bytes)
+producer: 100000 msgs in 0.017s (5830155 msg/s), checksum 15000150000
+consumer: 100000 msgs, FIFO order ok, checksum ok
+[1] + Done                 /usr/bin/producer
+# cd /usr/bin
+# uname -a
+QNX localhost 8.0.0 2026/02/27-10:59:13EST RaspberryPi5 aarch64le
+# use -i producer.exe
+'producer.exe' is not an executable file in PATH: '/proc/boot:/sbin:/bin:/usr/bin:/usr/sbin:/usr/libexec:/proc/boot:/lib:/usr/lib:/lib/dll:/lib/dll/pci'.
+# use -i producer
+QNX_BUILDID=(GNU)1eaf00cc9cfb507636e8bbfccc847d69
+No info available in /usr/bin/producer.
+# ldd producer
+./producer:
+	libsocket.so.4 => /lib/libsocket.so.4 (0x28aa2f9000)
+	libm.so.3 => /lib/libm.so.3 (0x28aa345000)
+	libc.so.6 => /lib/libc.so.6 (0x28
+
+
+
+====== Other SSH
+
+$) ssh root@192.168.208.81
+# pidin | grep producer
+ 1892378   1 usr/bin/producer              30f NANOSLEEP
+# pidin -p 1892378 mem
+     pid tid name                         prio STATE                      code  data        stack
+ 1892378   1 usr/bin/producer              30f NANOSLEEP                 2596K  258M    512K/512K
+             producer                      @2e9be3f000                1104K  304K
+             ldqnx-64.so.2                 @37750b2000                 228K   12K
+             libsocket.so.4                @37750ef000                 268K  4096
+             libm.so.3                     @377513b000                 248K  4096
+             libc.so.6                     @377517b000                 672K  8192
+             libgcc_s.so.1                 @377522f000                  76K  4096
+             /dev/shmem/qnxml_demo         @17432c6000 (       0)            4096
+             **zero ELF**                  @2e9bf9f000 (       0)            4096
+             **zero ELF**                  @37750ee000 (       0)            4096
+             **zero ELF**                  @3775132000 (       0)            8192
+             **zero ELF**                  @3775135000 (       0)             24K
+             **zero ELF**                  @3775179000 (       0)            4096
+             **zero ELF**                  @3775223000 (       0)             16K
+             **zero ELF**                  @3775229000 (       0)             24K
+             **zero ELF**                  @3775242000 (       0)            4096
+             **heap**                      @4466494000 (       0)            212K
+             **heap**                      @44664c9000 (       0)           2048K
+             **heap**                      @44666c9000 (  200000)            254M
+             **heap**                      @44764c9000 (       0)           1712K
+#

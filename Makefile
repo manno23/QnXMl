@@ -16,7 +16,20 @@ demo: host
 target:
 	dune build -x qnx
 
+# Static analysis: community OCaml/C rulebooks + project-specific rules
+# (tools/opengrep/qnxml.yml). region_stubs.c is scanned via a CAMLprim-free
+# copy so the C parser sees the whole file (tree-sitter chokes on the
+# `CAMLprim value` token pair); the original is excluded to avoid dupes.
+OPENGREP_RULES ?= /home/jm/data/qnx/.opengrep-rules
+opengrep:
+	@sed 's/^CAMLprim value/static value/' lib/region_stubs.c > /tmp/qnxml_stubs_scan.c
+	opengrep scan --no-git-ignore --exclude 'region_stubs.c' \
+	  --config $(OPENGREP_RULES)/semgrep-rules/ocaml \
+	  --config $(OPENGREP_RULES)/semgrep-rules/c \
+	  --config tools/opengrep/qnxml.yml \
+	  lib demo test /tmp/qnxml_stubs_scan.c
+
 clean:
 	dune clean
 
-.PHONY: host demo target clean
+.PHONY: host demo target clean opengrep

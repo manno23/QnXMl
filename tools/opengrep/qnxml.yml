@@ -1,0 +1,192 @@
+# qnxml.yml — project-specific opengrep rules for QnXMl.
+#
+# These encode the failure modes a generic rulebook cannot see in a
+# preallocated, cross-process, lock-free OCaml+C library:
+#   - non-atomic check-then-act on shared words (vclock merge race)
+#   - plain stores/loads where acquire/release publication is required
+#   - OCaml heap allocation inside "zero-allocation steady state" paths
+#   - 64->63 bit truncation of shared monotone counters
+#   - C-stub hazards: MAP_FIXED, discarded MsgSendv replies, EAGAIN
+#     pulses, blocking syscalls holding the runtime lock, unchecked shifts
+#
+# Run:  opengrep scan --no-git-ignore --config tools/opengrep/qnxml.yml lib demo test
+
+rules:
+
+  # ------------------------------------------------------------------
+  # OCaml: shared-memory concurrency
+  # ------------------------------------------------------------------
+
+  - id: qnxml-check-then-store-on-shared-word
+    languages: [ocaml]
+    severity: ERROR
+    message: >
+      Non-atomic check-then-store on a shared region word. Another process
+      can modify the word between the read and the store (lost update or
+      value inflation). Vclock.merge races this way against the owning
+      peer's atomic fetch_add tick. Use a CAS loop or an atomic max
+      primitive; a bare load + conditional store_rel is not atomic RMW.
+    pattern: if $B > $A then Region.store_rel $S $IX $B
+
+  - id: qnxml-plain-store-to-shared-word
+    languages: [ocaml]
+    severity: WARNING
+    paths:
+      include:
+        - "**/merkle.ml"
+    message: >
+      Plain (non-atomic) store to a shared region word. Merkle publishes
+      the root last on update, but with no release store and no acquire on
+      the reader side, a cross-process reader can observe the new root with
+      stale children (or a torn path). If the tree is ever read while
+      another process updates it, use store_rel on the root and load_acq
+      on reads, or document a quiescence requirement.
+    pattern-regex: '\.s\.\{[^}]+\}\s*<-'
+
+  - id: qnxml-plain-read-of-shared-config
+    languages: [ocaml]
+    severity: WARNING
+    message: >
+      Plain (non-acquire) read of a shared region word. Configuration
+      words written at init are only safe to read after an explicit
+      handshake (magic word / IPC) establishes happens-before. If this
+      read can run concurrently with the writer's init, use Region.load_acq.
+    pattern: Int64.to_int $S.{$IX}
+
+  - id: qnxml-shared-counter-truncation
+    languages: [ocaml]
+    severity: WARNING
+    message: >
+      A shared 64-bit counter is truncated to a 63-bit OCaml int. The
+      monotone-never-wrap invariant holds for int64, but arithmetic after
+      to_int wraps at 2^62; OCaml's (mod) then goes negative and indexing
+      raises. Fine for realistic lifetimes, but the "never wrapped" claim
+      in the docs must be qualified to 63 bits on the OCaml side.
+    pattern: Int64.to_int (Region.load_acq $S $IX)
+
+  - id: qnxml-int64-boxing-in-steady-state
+    languages: [ocaml]
+    severity: INFO
+    paths:
+      include:
+        - "lib/*"
+        - "demo/*"
+    message: >
+      Int64.of_int allocates a boxed int64 on the OCaml heap. Inside
+      push/pop/tick hot paths this contradicts the "zero OCaml heap
+      allocation in steady state" contract (each boxing is a GC-visible
+      minor allocation). Audit: keep boxing to init-only paths, or accept
+      and document the minor-allocation rate.
+    pattern: Int64.of_int $X
+
+  - id: qnxml-pmap-copy-log-heap-alloc
+    languages: [ocaml]
+    severity: INFO
+    paths:
+      include:
+        - "**/pmap.ml"
+    message: >
+      The copy log is an OCaml heap list consed per copied node, and the
+      version window is a heap list too. Every Pmap.set therefore allocates
+      on the OCaml heap in steady state — the strongest form of the
+      "never allocate" claim does not hold for Pmap. Either scope the claim
+      to Ring/Arena/Vclock/Merkle, or move the log into the region.
+    pattern: "$L := $X :: (! $L)"
+
+  - id: qnxml-mod-capacity-without-zero-guard
+    languages: [ocaml]
+    severity: WARNING
+    paths:
+      include:
+        - "**/ring.ml"
+    message: >
+      Modulo by t.cap: Ring.attach reads cap from the region with no
+      validation, so attaching to a not-yet-initialized slice gives cap=0
+      and raises Division_by_zero at runtime instead of failing at attach.
+      Validate cap > 0 (and width > 0) in attach.
+    pattern: $X mod $T.cap
+
+  - id: qnxml-failwith-runtime-surface
+    languages: [ocaml]
+    severity: INFO
+    paths:
+      include:
+        - "lib/*"
+    message: >
+      failwith reachable at runtime: inventory the crash surface for
+      steady-state operation. Region/Arena exhaustion are by design
+      (preallocation contract violations), but a SCHED_FIFO/IPC failure
+      path taking the process down may deserve a degraded-mode fallback.
+    pattern: failwith $MSG
+
+  # ------------------------------------------------------------------
+  # C stubs: OS-facing hazards
+  # ------------------------------------------------------------------
+
+  - id: qnxml-map-fixed-silent-overwrite
+    languages: [c]
+    severity: WARNING
+    message: >
+      MAP_FIXED silently replaces any existing mapping overlapping the
+      requested range — a wrong hint address can destroy the process's own
+      address space with no error. Prefer MAP_FIXED_NOREPLACE (check
+      EEXIST) or verify the range is free before mapping.
+    pattern: flags |= MAP_FIXED
+
+  - id: qnxml-msgsendv-reply-discarded
+    languages: [c]
+    severity: WARNING
+    message: >
+      MsgSendv collects the reply into a stack-local buffer that is never
+      read — the reply payload is silently discarded (the comment suggests
+      a caller buffer). Either return the reply words to OCaml or shrink
+      the reply iov to zero and document that sends are ack-only.
+    pattern: MsgSendv($COID, &$SIOV, $NS, &$RIOV, $NR)
+
+  - id: qnxml-pulse-eagain-crashes-producer
+    languages: [c]
+    severity: WARNING
+    message: >
+      MsgSendPulse fails with EAGAIN when the receiver's pulse pool is
+      exhausted; failing hard turns backpressure (producer spin-waiting on
+      a full ring, pulsing every retry) into a producer crash. Return the
+      error to OCaml and let the caller rate-limit or coalesce wakeups.
+    pattern: caml_failwith("MsgSendPulse")
+
+  - id: qnxml-blocking-call-holds-runtime-lock
+    languages: [c]
+    severity: ERROR
+    message: >
+      A potentially blocking QNX IPC call appears in a function that never
+      calls caml_release_runtime_system — every other OCaml domain/thread
+      stops for the duration of the block. Wrap blocking Msg* calls in
+      release/acquire (pointer values taken before releasing).
+    patterns:
+      - pattern-either:
+          - pattern: MsgReceive(...)
+          - pattern: MsgSendv(...)
+          - pattern: MsgReplyv(...)
+          - pattern: MsgSendPulse(...)
+      - pattern-not-inside: |
+          caml_release_runtime_system();
+          ...
+          caml_acquire_runtime_system();
+
+  - id: qnxml-ftruncate-resizes-shared-object
+    languages: [c]
+    severity: INFO
+    message: >
+      ftruncate on a shm_open fd with O_CREAT but without O_EXCL: if the
+      shared object already exists (e.g. a previous run or another
+      participant sized it differently), this silently resizes shared state
+      other processes may be using. Consider O_EXCL for create, or fstat
+      and verify the existing size first.
+    pattern: ftruncate($FD, $SIZE)
+
+  - id: qnxml-unchecked-shift-amount
+    languages: [c]
+    severity: WARNING
+    message: >
+      Shift amount comes straight from an OCaml value with no range check;
+      cpu >= 64 is undefined behavior. Clamp or validate before shifting.
+    pattern: (uintptr_t) 1 << Long_val($V)
