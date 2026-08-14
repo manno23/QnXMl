@@ -1,6 +1,6 @@
-# qnxml & vwc: functional systems architecture & capabilities on qnx
+functional systems architecture & capabilities on qnx
 
-an exploration into applying **functional programming techniques, persistent data structures, and object capability (ocap) security models** as first-class operating system primitives on the **qnx neutrino 8.0** real-time microkernel.
+Applying **functional programming techniques, persistent data structures, and object capability (ocap) security models** as first-class operating system primitives on the **qnx neutrino 8.0** real-time microkernel.
 
 ---
 
