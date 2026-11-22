@@ -6,13 +6,17 @@
  (wrapped false)
  (foreign_stubs
   (language c)
-  (names region_stubs))
+  (names region_stubs)
+  (flags
+   -fPIC
+   -pthread))
  (c_library_flags
   (:include link_flags.sexp)))
 
 ; librt exists only on Linux (and is a no-op shim on glibc >= 2.34);
 ; QNX puts shm_open/mlock in libc, and linking -lrt there fails.
+; -pthread covers the atomic-max self-test.
 (rule
  (with-stdout-to
   link_flags.sexp
-  (bash "case %{system} in linux*) echo '(-lrt)';; *) echo '()';; esac")))
+  (bash "case %{system} in linux*) echo '(-lrt -pthread)';; *) echo '(-pthread)';; esac")))

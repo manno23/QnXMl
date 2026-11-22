@@ -1,8 +1,11 @@
 # Build verification — aarch64 QNX cross-compile (2026-08-11)
 
 Status: **PASS** — the QnXMl library + demo cross-compile to genuine QNX
-Neutrino 8.0 aarch64le binaries. On-device demo run is the remaining step
-(Pi 5 not powered/reachable at commit time; see `deploy` below).
+Neutrino 8.0 aarch64le binaries. A later on-target run is recorded in
+`docs/shell-capture.txt` and `docs/console.txt` (the Pi was up; about 6.3M
+msg/s). That capture also shows `Failure("ConnectAttach")` when the consumer
+attached a stale region before the producer; the demo now returns that as
+`-errno`, drops the mapping, and retries until a handshake deadline.
 
 ## Toolchain
 
@@ -20,7 +23,7 @@ Neutrino 8.0 aarch64le binaries. On-device demo run is the remaining step
 ## Build
 
 ```sh
-cd /home/jm/data/qnx/QnXMl
+cd $QNX_ROOT/QnXMl
 source .envrc
 make target          # dune build -x qnx
 ```
@@ -54,7 +57,7 @@ binaries (C compiler comes from `ocamlc(qnx) -config`: `c_compiler: qcc
 ## Deploy to Pi 5 (device currently offline)
 
 ```sh
-cd /home/jm/data/qnx/qnx_custom_builds/src/local/qnxml
+cd $QNX_ROOT/qnx_custom_builds/src/local/qnxml
 make -f Makefile.deploy run        # scp + run producer/consumer on the Pi
 ```
 
@@ -67,6 +70,6 @@ make -f Makefile.deploy run        # scp + run producer/consumer on the Pi
 
 - This doc.
 - `docs/CROSS.md` (recipe + patches + config results + verified section).
-- CTI wiring: `/home/jm/data/qnx/qnx_custom_builds/src/local/qnxml/`
+- CTI wiring: `$QNX_ROOT/qnx_custom_builds/src/local/qnxml/`
   (Makefile, Makefile.deploy, INTEGRATION.md) + rpi5 snippet
   `targets/rpi5/snippets/system_files.custom.qnxml`.

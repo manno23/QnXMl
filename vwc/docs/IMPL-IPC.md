@@ -17,7 +17,7 @@ house style already proven on a Pi 5: `QnXMl/lib/region_stubs.c` (the
 `__QNXNTO__` MsgSendv/MsgReceive/MsgReply/pulse wrappers) and
 `QnXMl/demo/{producer,consumer}.ml` (a working pulse control plane over a
 named shm region). Every decision below defers to that house style and to
-the project-local QNX skill at `/home/jm/data/qnx/.pi/skills/qnx-os-and-application-design/`.
+the project-local QNX skill at `$QNX_ROOT/.pi/skills/qnx-os-and-application-design/`.
 
 Citation key (local paths, all read for this doc):
 - **SKILL**   = `…/qnx-os-and-application-design/SKILL.md`
@@ -25,9 +25,9 @@ Citation key (local paths, all read for this doc):
 - **PTS**     = `…/qnx-os-and-application-design/references/processes-threads-scheduling.md`
 - **MC**      = `…/qnx-os-and-application-design/references/multicore.md`
 - **MEM**     = `…/qnx-os-and-application-design/references/memory.md`
-- **SRS**     = `/home/jm/data/qnx/VWC-OCaml/docs/VWC-SRS-001.md`
-- **STUBS**   = `/home/jm/data/qnx/QnXMl/lib/region_stubs.c`
-- **DEMO**    = `/home/jm/data/qnx/QnXMl/demo/{producer,consumer,layout}.ml`
+- **SRS**     = `$QNX_ROOT/VWC-OCaml/docs/VWC-SRS-001.md`
+- **STUBS**   = `$QNX_ROOT/QnXMl/lib/region_stubs.c`
+- **DEMO**    = `$QNX_ROOT/QnXMl/demo/{producer,consumer,layout}.ml`
 
 ---
 

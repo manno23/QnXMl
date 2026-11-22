@@ -91,7 +91,7 @@ linkable OCaml objects, so the host switch's header dir is enough.
 Reference command that succeeds:
 
 ```sh
-. /home/jm/data/qnx/qnx_custom_builds/qnx800/qnxsdp-env.sh
+. $QNX_ROOT/qnx_custom_builds/qnx800/qnxsdp-env.sh
 qcc -Vgcc_ntoaarch64le -c lib/region_stubs.c \
   -I"$(opam exec --switch=ocaml-base-compiler.5.3.0 -- ocamlopt -where)" \
   -o /tmp/region_stubs_qnx.o
@@ -210,17 +210,17 @@ aarch64 `compilerlibs/*.cmxa/.a`, host x86-64 `ocamlc.opt`/`ocamlopt.opt`.
 `$HOME/.opam/default/lib/findlib.conf.d/qnx.conf`:
 
 ```
-path(qnx)        = "/home/jm/.opam/default/qnx-sysroot/lib/ocaml"
-destdir(qnx)     = "/home/jm/.opam/default/qnx-sysroot/lib/ocaml"
-ocamlc(qnx)      = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlc"
-ocamlopt(qnx)    = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlopt"
-ocamlmklib(qnx)  = "/home/jm/.opam/default/qnx-sysroot/bin/ocamlmklib"
+path(qnx)        = "$OPAM_SWITCH_PREFIX/qnx-sysroot/lib/ocaml"
+destdir(qnx)     = "$OPAM_SWITCH_PREFIX/qnx-sysroot/lib/ocaml"
+ocamlc(qnx)      = "$OPAM_SWITCH_PREFIX/qnx-sysroot/bin/ocamlc"
+ocamlopt(qnx)    = "$OPAM_SWITCH_PREFIX/qnx-sysroot/bin/ocamlopt"
+ocamlmklib(qnx)  = "$OPAM_SWITCH_PREFIX/qnx-sysroot/bin/ocamlmklib"
 ocamldep(qnx)    = "ocamldep"
 ocamldoc(qnx)    = "ocamldoc"
 ```
 
 `ocamlfind -toolchain qnx ocamlopt -config` → `architecture: arm64`,
-`system: ntoqnx8`, `standard_library: /home/jm/.opam/default/qnx-sysroot/lib/ocaml`.
+`system: ntoqnx8`, `standard_library: $OPAM_SWITCH_PREFIX/qnx-sysroot/lib/ocaml`.
 
 ### Verified end-to-end
 

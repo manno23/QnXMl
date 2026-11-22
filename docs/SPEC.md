@@ -1,16 +1,23 @@
 # QnXMl — Specification, Direction Assessment, and POC Plan
 
 Status: proposal for team review. Not a release artifact.
+
+## Status after the 2026-11 review
+
+The substrate hot paths (Ring push/pop, Arena alloc/free, Pmap set/find, Vclock tick/compare/merge, Merkle update) allocate no OCaml heap in steady state. `test/test.ml` asserts a zero `Gc.minor_words` delta for each. Arena free-list and in-use state, and the Pmap version window, live in the slab; both have `attach`, covered by a fork test. Audit ids are marked in `docs/opengrep-audit.md`.
+
+Paths in this document that used to name one developer's home directory are `$QNX_ROOT` (the CTI tree; on the original machine `$HOME/data/qnx`) and `$OPAM_SWITCH_PREFIX` (the active opam switch).
+
 Sources of truth consulted (in order):
-- `/home/jm/data/qnx/.pi/skills/qnx-os-and-application-design/SKILL.md` + `references/{architecture,memory,processes-threads-scheduling,multicore,timing,api-navigation}.md` (hereafter **design-skill / design-skill:memory.md** etc.)
-- `/home/jm/data/qnx/.pi/skills/qnx-project-development/SKILL.md` + `references/{development-workflow,make-conventions,bsp-and-images,target-operations,project-governance}.md` (hereafter **dev-skill / dev-skill:bsp-and-images.md** etc.)
+- `$QNX_ROOT/.pi/skills/qnx-os-and-application-design/SKILL.md` + `references/{architecture,memory,processes-threads-scheduling,multicore,timing,api-navigation}.md` (hereafter **design-skill / design-skill:memory.md** etc.)
+- `$QNX_ROOT/.pi/skills/qnx-project-development/SKILL.md` + `references/{development-workflow,make-conventions,bsp-and-images,target-operations,project-governance}.md` (hereafter **dev-skill / dev-skill:bsp-and-images.md** etc.)
 - Project: `README.md`, `docs/CROSS.md`, `lib/{region,ring,arena,pmap,vclock,merkle}.ml`, `lib/region_stubs.c`, `demo/{producer,consumer,layout}.ml`
-- Real build/deploy path: `/home/jm/data/qnx/qnx_custom_builds/NOTES.md`, `README.md`, `Makefile`, `targets/rpi5/{variables.mk,mkqnximage.config}`, `example-qnx-project/{Makefile,NEXT_STEP.md}` (the **CTI** = Custom Target Image build system)
+- Real build/deploy path: `$QNX_ROOT/qnx_custom_builds/NOTES.md`, `README.md`, `Makefile`, `targets/rpi5/{variables.mk,mkqnximage.config}`, `example-qnx-project/{Makefile,NEXT_STEP.md}` (the **CTI** = Custom Target Image build system)
 
 Verified environment (recorded, per dev-skill:project-governance.md):
 - Host: Debian trixie, Linux x86_64 (`uname -a` 2026-07-04 kernel).
 - OCaml 5.3.0 via opam switch `ocaml-base-compiler.5.3.0` (`.envrc`).
-- QNX SDP 8.0 staged by CTI at `/home/jm/data/qnx/qnx_custom_builds/qnx800`; `qnxsdp-env.sh` present (46 lines); `qcc -V` lists `12.2.0,gcc_ntoaarch64le`. Target triple: `aarch64-unknown-nto-qnx8.0.0`.
+- QNX SDP 8.0 staged by CTI at `$QNX_ROOT/qnx_custom_builds/qnx800`; `qnxsdp-env.sh` present (46 lines); `qcc -V` lists `12.2.0,gcc_ntoaarch64le`. Target triple: `aarch64-unknown-nto-qnx8.0.0`.
 - Target: Raspberry Pi 5 (BCM2712, 4× Cortex-A76, aarch64le), CTI image `build/rpi5/rpi5.img`, hostname `qnxpi`, dev access `qnxuser@192.168.208.80` over cgem0 ethernet.
 
 ---
@@ -228,7 +235,7 @@ importance:
   dev-skill:project-governance.md "Definition of done", the POC milestone
   must end with the binaries staged into the CTI image via a snippet and
   boot-tested from the flashed `rpi5.img` (see §B.4).** Also flag: the
-  stale GitHub snapshot at `/home/jm/data/qnx/qnx_custom_builds/QnXMl/`
+  stale GitHub snapshot at `$QNX_ROOT/qnx_custom_builds/QnXMl/`
   (old flat-file layout, no dune/demo) is a second source of truth and must
   be updated or removed before any CTI integration, or the wrong artifacts
   will be staged.
@@ -324,7 +331,7 @@ the fixes from §A that are marked POC-required.
   equivalent) to `qnxuser@192.168.208.80:/tmp`. Iterate here.
 - **Integration loop (required before calling the POC done, per
   dev-skill:project-governance.md DoD):**
-  1. Update or delete the stale `/home/jm/data/qnx/qnx_custom_builds/QnXMl/`
+  1. Update or delete the stale `$QNX_ROOT/qnx_custom_builds/QnXMl/`
      snapshot (A.12) so there is one source of truth.
   2. Stage the three `.exe`s and any needed shared libs under the CTI tree
      (e.g. a new `system_files.custom.qnxml` snippet placing them in
@@ -332,7 +339,7 @@ the fixes from §A that are marked POC-required.
      add an `ifs_start`/slm snippet entry launching the demo (follow
      `targets/rpi5/snippets/` conventions; keep `slm.~20.custom.rootfs`
      pattern in mind).
-  3. `cd /home/jm/data/qnx/qnx_custom_builds && make TARGET=rpi5` (sources
+  3. `cd $QNX_ROOT/qnx_custom_builds && make TARGET=rpi5` (sources
      `qnxsdp-env.sh` internally; per NEXT_STEP.md, apk steps need it
      sourced); result `build/rpi5/rpi5.img`.
   4. Prove the staged artifact is the imaged one: `use -i`/`ntoaarch64-readelf`
@@ -410,7 +417,7 @@ the fixes from §A that are marked POC-required.
 
 ```text
 SDP release + environment script:
-    QNX SDP 8.0 (CTI-staged) at /home/jm/data/qnx/qnx_custom_builds/qnx800;
+    QNX SDP 8.0 (CTI-staged) at $QNX_ROOT/qnx_custom_builds/qnx800;
     env: qnxsdp-env.sh (46 lines) or repo .envrc (sets QNX_HOST/QNX_TARGET,
     opam switch ocaml-base-compiler.5.3.0). Verified: qcc 12.2.0
     gcc_ntoaarch64le, target triple aarch64-unknown-nto-qnx8.0.0.
@@ -467,14 +474,14 @@ Memory: shared? device registers? contiguous/DMA? typed-memory pool?
 
 ```text
 SDP release + environment script:
-    QNX SDP 8.0; /home/jm/data/qnx/qnx_custom_builds/qnx800/qnxsdp-env.sh
+    QNX SDP 8.0; $QNX_ROOT/qnx_custom_builds/qnx800/qnxsdp-env.sh
     (CTI-installed SDP, the one qcc 12.2.0/gcc_ntoaarch64le resolves
-    against). Repo builds also source /home/jm/data/qnx/QnXMl/.envrc
+    against). Repo builds also source $QNX_ROOT/QnXMl/.envrc
     (opam 5.3.0 + same SDP paths).
 
 QNX_HOST / QNX_TARGET:
-    QNX_HOST=/home/jm/data/qnx/qnx_custom_builds/qnx800/host/linux/x86_64
-    QNX_TARGET=/home/jm/data/qnx/qnx_custom_builds/qnx800/target/qnx
+    QNX_HOST=$QNX_ROOT/qnx_custom_builds/qnx800/host/linux/x86_64
+    QNX_TARGET=$QNX_ROOT/qnx_custom_builds/qnx800/target/qnx
 
 Host OS:
     Debian trixie (Linux 7.1.3 x86_64), verified.

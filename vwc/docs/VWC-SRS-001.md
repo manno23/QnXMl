@@ -29,7 +29,10 @@ descriptor. **OpaqueRef** — the 128-bit cross-process reference defined in
 recipe references. **Write Log** — the temporal, append-only record stream
 within a Grant. **Seal** — the single release-store that renders a Grant's
 Write Log immutable. **Head** — the newest published operation.
-**Store** — the SQLite-backed content-addressed persistent store.
+**Store** — the LMDB content-addressed persistent store vendored at
+`vwc/vendor/lmdb`. Rev A of this SRS said "SQLite"; `docs/IMPL-STORE.md` is
+the adopted mapping. Requirement text that still says "SQLite WAL" means
+that single LMDB write transaction.
 **Intent Journal** — the fsync'd fixed-record commit journal.
 
 ---
@@ -310,7 +313,7 @@ Write Log ranges shall complete before the Intent Journal append.
   Verify: T (ordering fault injection)
 
 [VWC-TXN-004] All persistent objects of one operation shall be committed
-in exactly one Store (SQLite WAL) transaction.
+in exactly one Store (LMDB write) transaction.
   Rationale: single fsync point; no multi-file ordering.
   Verify: T
 

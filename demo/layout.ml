@@ -1,52 +1,59 @@
-(* Shared-memory layout for the two-process demo. Producer and consumer both
-   carve the region in this order, so their word indices agree — the whole
-   cross-process contract is this module.
+(** Shared-memory layout for the two-process demo.
 
-   Slice order (carve order is the contract; bump header_words only with the
-   magic, which gates consumer attach):
-     header:  magic, producer pid, producer chid, consumer pid, consumer chid
-     ring:    Ring.words_needed words (head/tail padded per SPEC A.5) *)
+    The cross-process contract is the region descriptor (magic, version,
+    size, ready flag, epoch, generation — see [Region]) followed by slices
+    carved in the same order:
+
+    - header: producer pid, producer chid, consumer pid, consumer chid
+    - ring: [Ring.words_needed] words
+
+    Ready is the region descriptor's state word, release-stored by the
+    producer only after the ring and the producer's pid/chid are published.
+    A zeroed or foreign object fails [Region.attach] instead of being
+    treated as a live session. *)
 
 let shm_name = "/qnxml_demo"
 
 let slots = 64
-let width = 4 (* words per message: seq, payload, 2 spare *)
+let width = 4
 
-(* Word 0 of the region: producer release-stores this AFTER Ring.init AND
-   after publishing its own pid/chid (words 1–2), so an early-attaching
-   consumer never sees a half-initialized ring or a missing control plane.
-   Words 1–2: producer pid + channel id. Words 3–4: consumer pid + channel
-   id — the producer waits for word 3 (the "consumer registered" flag),
-   release-ordered after word 4 (the consumer's chid), so a data-before-flag
-   publish. *)
-let magic = 0x514E584D4C64656DL (* "QNXMLdem" *)
+let header_words = 8
+let producer_pid = 0
+let producer_chid = 1
+let consumer_pid = 2
+let consumer_chid = 3
+(* 1 while the consumer may be blocked in MsgReceive. Release-stored by the
+   consumer before it rechecks the ring; the producer CAS-es it back to 0
+   and pulses. See [Wake.arm]. *)
+let consumer_asleep = 4
 
-let header_words = 5
-let total_words = header_words + Ring.words_needed ~slots ~width
+let total_words =
+  Region.descr_words + header_words + Ring.words_needed ~slots ~width
 
-(* Control-channel staging: a pulse is struct _pulse = 16 bytes = 2 words;
-   the status message is 2 words; the ack reply is 1 word. 4 words gives
-   headroom and a fixed buffer for MsgReceive's validate-length check. *)
 let ctl_words = 4
 
-(* Pulse codes must live in _PULSE_CODE_MINAVAIL..MAXAVAIL (0..127).
-   _PULSE_CODE_DISCONNECT = -33 (kernel-reserved, delivered on client death
-   thanks to _NTO_CHF_DISCONNECT). struct _pulse: type u16, subtype u16,
-   code i8 at byte offset 4 — as an int64 word (LE), code = bits 32..39. *)
 let pulse_data_ready = 1
 let pulse_disconnect = (-33) land 0xFF
-let pulse_code buf =
-  Int64.to_int
-    (Int64.logand (Int64.shift_right_logical buf.{0} 32) 0xFFL)
+let pulse_code = Region.pulse_code
 
-(* Scheduling map (SPEC B.1): SCHED_FIFO, priorities <= 63 so the
-   unprivileged qnxuser needs no PROCMGR_AID_PRIORITY; BMP-style pinning
-   so producer/consumer provably run on different cores. *)
 let producer_prio = 30
 let consumer_prio = 31
 let producer_cpu = 0
 let consumer_cpu = 1
 
-(* seq value that marks end-of-stream; its payload word carries the
-   producer's running checksum for the consumer to verify. *)
-let sentinel = -1L
+let sentinel = -1
+let handshake_timeout = 10.0
+
+let die msg =
+  prerr_endline msg;
+  exit 1
+
+let must_slice r n =
+  match Region.slice r n with
+  | Ok s -> s
+  | Error e -> die ("slice: " ^ Region.error_to_string e)
+
+let private_slice n =
+  match Region.create ~words:(Region.descr_words + n) () with
+  | Ok r -> must_slice r n
+  | Error e -> die ("private region: " ^ Region.error_to_string e)

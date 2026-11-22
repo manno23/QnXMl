@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up OCaml
+        # No flambda, same generation as the allocation-budget measurement.
+        # QNX IPC is not executed: have_qnx_ipc is false and the stubs
+        # return ENOTSUP.
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "4.14.2"
+      - name: Install dune
+        run: opam install -y dune
+      - name: Build and test
+        run: opam exec -- dune build && opam exec -- dune test

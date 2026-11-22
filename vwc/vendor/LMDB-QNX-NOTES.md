@@ -3,7 +3,7 @@
 Proven: `vendor/lmdb/libraries/liblmdb` cross-compiles for
 `aarch64-unknown-nto-qnx8.0.0` with:
 
-    source /home/jm/data/qnx/QnXMl/.envrc
+    source $QNX_ROOT/QnXMl/.envrc
     make -C vendor/lmdb/libraries/liblmdb clean
     make -C vendor/lmdb/libraries/liblmdb \
       CC="qcc -Vgcc_ntoaarch64le" AR="ntoaarch64-ar" \
