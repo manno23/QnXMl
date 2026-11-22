@@ -17,6 +17,7 @@ let s_next = 4
 let s_live = 5
 let s_newest = 6
 let s_log = 7
+let s_alloc = 9 (* intrusive stack of nodes allocated by the in-flight set *)
 
 type t = {
   a : Arena.t;
@@ -56,6 +57,7 @@ let create a meta ~retention =
     Region.store_relaxed meta s_live 1;
     Region.store_relaxed meta s_newest 0;
     Region.store_relaxed meta s_log nil;
+    Region.store_relaxed meta s_alloc nil;
     Region.store_int meta s_magic magic;
     Ok { a; meta; retention; capacity; slots; repl }
   end
@@ -81,10 +83,31 @@ let attach a meta =
         repl = header + (retention * slot_words);
       }
 
+(* New nodes of this [set] are stacked through [repl.(i)], which the copy
+   log does not use for a node until a later version copies it. On failure
+   the stack is freed; on success it is abandoned and the nodes stay in
+   the new tree. *)
+let push_new t i =
+  let head = Region.load_relaxed t.meta s_alloc in
+  Region.store_relaxed t.meta (t.repl + i) head;
+  Region.store_relaxed t.meta s_alloc i
+
+let rec rollback t fuel =
+  if fuel = 0 then ()
+  else
+    let i = Region.load_relaxed t.meta s_alloc in
+    if i < 0 then ()
+    else
+      let next = Region.load_relaxed t.meta (t.repl + i) in
+      Region.store_relaxed t.meta s_alloc next;
+      ignore (Arena.free t.a i);
+      rollback t (fuel - 1)
+
 let mk t key value left right =
   let i = Arena.alloc t.a in
   if i < 0 then nil
   else begin
+    push_new t i;
     Arena.store_int64 t.a i k_ key;
     Arena.store_int64 t.a i v_ value;
     Arena.store_mix t.a i p_ key;
@@ -96,12 +119,15 @@ let mk t key value left right =
 let dup t node =
   let j = Arena.alloc t.a in
   if j < 0 then nil
-  else if not (Arena.copy_node t.a j node) then nil
   else begin
-    let head = Region.load_relaxed t.meta s_log in
-    Region.store_relaxed t.meta (t.repl + node) head;
-    Region.store_relaxed t.meta s_log node;
-    j
+    push_new t j;
+    if not (Arena.copy_node t.a j node) then nil
+    else begin
+      let head = Region.load_relaxed t.meta s_log in
+      Region.store_relaxed t.meta (t.repl + node) head;
+      Region.store_relaxed t.meta s_log node;
+      j
+    end
   end
 
 let rec ins t node key value =
@@ -209,10 +235,13 @@ let retire t =
 
 let set t key value =
   Region.store_relaxed t.meta s_log nil;
+  Region.store_relaxed t.meta s_alloc nil;
   let root0 = root_for t (-1) in
   let root' = ins t root0 key value in
-  if root' < 0 then nil
-  else
+  if root' < 0 then begin
+    rollback t t.capacity;
+    nil
+  end else
     let id = Region.fetch_add_int t.meta s_next 1 in
     if Region.load_relaxed t.meta s_live = t.retention then retire t;
     let newest = Region.load_relaxed t.meta s_newest in

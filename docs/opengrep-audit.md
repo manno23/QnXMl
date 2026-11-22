@@ -10,7 +10,7 @@ The findings below are the original audit. Current code addresses them as follow
 | id | status | where |
 |---|---|---|
 | E1 | **fixed** | `Vclock.merge` is a CAS-max loop; `Vclock.tick` stays `fetch_add`. A tick that linearizes after a merge is `max+1` (a later event). `Region.atomic_max_self_test` runs the same race under pthreads, because host systhreads hold the runtime lock and cannot interleave the OCaml loop. |
-| E2 | **fixed** | `MsgSendPulse` returns `-errno` (`EAGAIN` included). `Wake.send` coalesces to one successful pulse per empty→nonempty debt. The producer backs off instead of raising. |
+| E2 | **fixed** | `MsgSendPulse` returns `-errno` (`EAGAIN` included). The producer pulses only after a push, and only if the consumer has published a sleeper flag (`Wake.arm`): CAS the flag 1→0, pulse once, and on EAGAIN put the flag back. The consumer release-stores the flag before it rechecks the ring, so a drain-then-sleep cannot miss the wakeup. |
 | W1 | **fixed** | Attach `fstat`s and returns `Too_small` when `st_size` is short. No touch past the object. |
 | W2 | **fixed** | Create is `O_CREAT\|O_EXCL`. An existing object is `Exists` and is not `ftruncate`d. `ftruncate` runs only on the brand-new fd. The syntactic opengrep rule still matches that `ftruncate` call; the unsafe "resize a live object" path is gone. |
 | W3 | **fixed** | Nonzero `addr` uses `MAP_FIXED_NOREPLACE`, or `Fixed_unsupported` where that flag does not exist. No silent `MAP_FIXED` clobber. |
@@ -25,7 +25,7 @@ The findings below are the original audit. Current code addresses them as follow
 | I5 | **fixed** | Arena free CAS-es an allocated flag; double-free and out-of-range free return false. |
 | I6 | **fixed** | `Vclock.pack` writes the dense wire vector. `compare`/`merge` still take that dense form. |
 | I7 | **fixed** | `qcon.py` exits unless `QNXML_QCONN=1`. Host comes from argv or `QNXML_QCONN_HOST`. |
-| stale session (`shell-capture.txt` `Failure("ConnectAttach")`) | **fixed** | `connect_attach` returns `-errno`. The consumer unmaps and retries until the handshake deadline. `Region.recover` replaces a region whose epoch pid is dead and refuses one whose creator is still alive. |
+| stale session (`shell-capture.txt` `Failure("ConnectAttach")`) | **fixed** | `connect_attach` returns `-errno`. The consumer unmaps and retries until the handshake deadline. `Region.recover` holds an exclusive flock on a sibling shm for the whole check-and-replace, so a second producer cannot unlink a live replacement. A creator pid that is still alive (published or not) yields `Busy`. Failed `attach` validation `munmap`s before returning. |
 
 Pmap readers must not hold a root across a concurrent `set` that retires it. There is no epoch reclamation yet; the mli states that quiescence contract. VWC itself is still interfaces only.
 

@@ -16,6 +16,18 @@ let force msg = function
 
 let shm name = Printf.sprintf "/qnxml_%s_%d" name (Unix.getpid ())
 
+let map_lines () =
+  let ic = open_in "/proc/self/maps" in
+  let n = ref 0 in
+  (try
+     while true do
+       ignore (input_line ic);
+       incr n
+     done
+   with End_of_file -> ());
+  close_in ic;
+  !n
+
 let dead_pid () =
   flush_all ();
   match Unix.fork () with
@@ -264,7 +276,15 @@ let () =
   Region.store_int (Region.backing mapped) 0 0x111;
   check "foreign magic is rejected"
     (Region.attach ~name ~words:32 () = Error Region.Bad_magic);
+  let before_maps = map_lines () in
+  for _ = 1 to 40 do
+    match Region.attach ~name ~words:32 () with
+    | Error Region.Bad_magic -> ()
+    | _ -> check "repeated bad attach" false
+  done;
+  check "failed attach releases the mapping" (map_lines () - before_maps < 5);
   Region.unlink name;
+  Region.unlink (name ^ "_lk");
   let dead = dead_pid () in
   let stale = force_region (Region.create ~name ~epoch:dead ~words:32 ()) in
   Region.publish stale;
@@ -279,7 +299,70 @@ let () =
   check "live creator is busy"
     (Region.recover ~name ~epoch:alive ~words:32 () = Error Region.Busy);
   Region.unlink name;
+  Region.unlink (name ^ "_lk");
   check "missing name" (Region.attach ~name ~words:32 () = Error Region.Not_found);
+
+  (* Two recovers of one dead session: the survivor's bytes must stay. *)
+  let race = shm "race" in
+  Region.unlink race;
+  let dead2 = dead_pid () in
+  let stale2 = force_region (Region.create ~name:race ~epoch:dead2 ~words:32 ()) in
+  Region.publish stale2;
+  Region.unmap stale2;
+  let to_parent_r, to_parent_w = Unix.pipe () in
+  let to_child_r, to_child_w = Unix.pipe () in
+  flush_all ();
+  (match Unix.fork () with
+  | 0 ->
+      Unix.close to_parent_r;
+      Unix.close to_child_w;
+      let epoch = Unix.getpid () in
+      let rc =
+        match Region.recover ~name:race ~epoch ~words:32 () with
+        | Error _ -> 2
+        | Ok reg ->
+            match Region.slice reg (32 - Region.descr_words) with
+            | Error _ -> 3
+            | Ok s ->
+                Region.store_relaxed s 0 0xA1;
+                Region.publish reg;
+                let b = Bytes.make 1 'x' in
+                ignore (Unix.write to_parent_w b 0 1);
+                ignore (Unix.read to_child_r b 0 1);
+                0
+      in
+      Unix._exit rc
+  | holder ->
+      Unix.close to_parent_w;
+      Unix.close to_child_r;
+      let b = Bytes.make 1 'x' in
+      ignore (Unix.read to_parent_r b 0 1);
+      flush_all ();
+      let challenger =
+        match Unix.fork () with
+        | 0 ->
+            Unix.close to_parent_r;
+            Unix.close to_child_w;
+            let rc =
+              match Region.recover ~name:race ~epoch:(Unix.getpid ()) ~words:32 () with
+              | Error Region.Busy -> 0
+              | Ok _ -> 4
+              | Error _ -> 5
+            in
+            Unix._exit rc
+        | pid -> pid
+      in
+      let _, st = Unix.waitpid [] challenger in
+      check "second recover leaves the live creator" (st = Unix.WEXITED 0);
+      let seen = force_region (Region.attach ~name:race ~words:32 ()) in
+      let slice = force_region (Region.slice seen (32 - Region.descr_words)) in
+      check "live creator's marker was not replaced"
+        (Region.load_relaxed slice 0 = 0xA1);
+      ignore (Unix.write to_child_w b 0 1);
+      let _, st = Unix.waitpid [] holder in
+      check "holding recoverer exits cleanly" (st = Unix.WEXITED 0);
+      Region.unlink race;
+      Region.unlink (race ^ "_lk"));
 
   print_endline "ipc capability:";
   check "this host is not QNX" (not (Region.have_qnx_ipc ()));
@@ -297,6 +380,30 @@ let () =
   check "a landed pulse clears the debt" ((not !owed) && rc = 0);
   let rc = Wake.send ~owed ~pulse:(fun () -> incr calls; 0) in
   check "coalesce skips a second pulse" (!calls = 2 && rc = 0);
+  let word = ref 0 in
+  let pulses = ref 0 in
+  let load () = !word in
+  let cas old now =
+    if !word = old then begin
+      word := now;
+      true
+    end else false
+  in
+  word := 0;
+  check "arm does not pulse a running consumer"
+    (Wake.arm ~load ~cas ~pulse:(fun () -> incr pulses; 0) = Wake.Awake && !pulses = 0);
+  word := 1;
+  check "arm pulses a published sleeper once"
+    (Wake.arm ~load ~cas ~pulse:(fun () -> incr pulses; 0) = Wake.Pulsed
+     && !word = 0 && !pulses = 1);
+  word := 1;
+  pulses := 0;
+  check "EAGAIN restores the sleeper flag"
+    (match Wake.arm ~load ~cas ~pulse:(fun () -> incr pulses; -Region.eagain) with
+     | Wake.Again rc -> rc = -Region.eagain && !word = 1 && !pulses = 1
+     | _ -> false);
+  check "restored sleeper can be pulsed"
+    (Wake.arm ~load ~cas ~pulse:(fun () -> incr pulses; 0) = Wake.Pulsed && !word = 0);
 
   let now = ref 0 in
   let ntry = ref 0 in
@@ -413,6 +520,30 @@ let () =
   check "window holds exactly retention versions" (Pmap.live_count m = 3);
   check "map correct after churn" (Pmap.find_eq m 49L 999L);
   check "early version retired" (not (Pmap.has_version m v1));
+  let tiny_cap = 2 in
+  let tiny_arena =
+    force "tiny pmap arena"
+      (Arena.create
+         (force_region
+            (Region.slice region
+               (Arena.words_needed ~capacity:tiny_cap ~node_words:Pmap.node_words)))
+         ~capacity:tiny_cap ~node_words:Pmap.node_words)
+  in
+  let tiny_map =
+    force "tiny pmap"
+      (Pmap.create tiny_arena
+         (force_region
+            (Region.slice region
+               (Pmap.words_needed ~retention:2 ~capacity:tiny_cap)))
+         ~retention:2)
+  in
+  check "tiny map accepts the first key" (Pmap.set tiny_map 10L 100L > 0);
+  check "failed insert rolls the pool back"
+    (Pmap.set tiny_map 20L 200L = -1 && Pmap.nodes_in_use tiny_map = 1);
+  check "rolled-back map still has the first key" (Pmap.find_eq tiny_map 10L 100L);
+  check "rolled-back map has no partial key" (not (Pmap.mem tiny_map 20L));
+  check "overwrite still fits after the rollback"
+    (Pmap.set tiny_map 10L 111L > 0 && Pmap.find_eq tiny_map 10L 111L);
 
   print_endline "vclock:";
   let peers = 4 in

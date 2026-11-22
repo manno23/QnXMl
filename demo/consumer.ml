@@ -117,34 +117,49 @@ let () =
               "consumer: control channel %d (pid %d), connected (coid %d)\n%!"
               chid (Unix.getpid ()) coid;
             let recv = Layout.private_slice Layout.ctl_words in
-            let rec loop () =
-              drain ();
-              if !running then begin
-                let rcvid, nbytes =
-                  Region.msg_receive chid recv 0 Layout.ctl_words
-                in
-                if Region.is_pulse rcvid then begin
-                  let code = Layout.pulse_code recv in
-                  if code = Layout.pulse_disconnect then begin
-                    Printf.printf "consumer: producer disconnected (pulse %d)\n%!"
-                      code;
-                    exit 1
-                  end;
-                  if code <> Layout.pulse_data_ready then
-                    Printf.eprintf "consumer: unexpected pulse code %d\n%!" code;
-                  loop ()
-                end else if rcvid > 0 then begin
-                  if nbytes > Layout.ctl_words * 8 then
-                    Printf.eprintf "consumer: oversized message %d bytes\n%!" nbytes;
-                  ignore (Region.msg_reply rcvid 0);
-                  loop ()
+            (* Publish asleep BEFORE rechecking the ring, then block only if
+               it is still empty. The producer arms after its push, so it
+               cannot miss the transition where we drain the last item and
+               sleep. *)
+            let rec park () =
+              if not !running then ()
+              else begin
+                Region.store_int hdr Layout.consumer_asleep 1;
+                if Ring.occupancy ring > 0 then begin
+                  Region.store_relaxed hdr Layout.consumer_asleep 0;
+                  drain ();
+                  park ()
                 end else begin
-                  Printf.printf "consumer: receive error %d\n%!" rcvid;
-                  exit 1
+                  let rcvid, nbytes =
+                    Region.msg_receive chid recv 0 Layout.ctl_words
+                  in
+                  Region.store_relaxed hdr Layout.consumer_asleep 0;
+                  if Region.is_pulse rcvid then begin
+                    let code = Layout.pulse_code recv in
+                    if code = Layout.pulse_disconnect then begin
+                      Printf.printf "consumer: producer disconnected (pulse %d)\n%!"
+                        code;
+                      exit 1
+                    end;
+                    if code <> Layout.pulse_data_ready then
+                      Printf.eprintf "consumer: unexpected pulse code %d\n%!" code;
+                    drain ();
+                    park ()
+                  end else if rcvid > 0 then begin
+                    if nbytes > Layout.ctl_words * 8 then
+                      Printf.eprintf "consumer: oversized message %d bytes\n%!"
+                        nbytes;
+                    ignore (Region.msg_reply rcvid 0);
+                    drain ();
+                    park ()
+                  end else begin
+                    Printf.printf "consumer: receive error %d\n%!" rcvid;
+                    exit 1
+                  end
                 end
               end
             in
-            loop ();
+            park ();
             let status = Layout.private_slice Layout.ctl_words in
             Region.store_relaxed status 0 (!expected - 1);
             Region.store_relaxed status 1 !checksum;

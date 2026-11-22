@@ -27,7 +27,9 @@ val create : Arena.t -> Region.words -> retention:int -> (t, error) result
 val attach : Arena.t -> Region.words -> (t, error) result
 
 val set : t -> int64 -> int64 -> int
-(** New version id, or [-1] if the arena cannot supply the path. *)
+(** New version id, or [-1] if the arena cannot supply the path. A failed
+    insert frees every node it allocated, so the live version and the
+    in-use count are unchanged. *)
 
 val find_eq : ?version:int -> t -> int64 -> int64 -> bool
 val mem : ?version:int -> t -> int64 -> bool

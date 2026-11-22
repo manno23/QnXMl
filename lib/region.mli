@@ -74,9 +74,11 @@ val attach :
 val recover :
   ?addr:nativeint -> name:string -> epoch:int -> words:int -> unit ->
   (t, error) result
-(** Take over a named region whose creator is dead or that never reached
-    [publish]. A ready region whose epoch pid is still alive yields
-    [Error Busy] and is left untouched. Foreign magic is not reclaimed. *)
+(** Take over a named region whose creator pid is dead, or whose descriptor
+    was never written. The check and the replacement run under an exclusive
+    lock, so two producers cannot each unlink the other's fresh region.
+    A creator that is still alive — published or not — yields [Error Busy].
+    Foreign magic is not reclaimed. *)
 
 val unlink : string -> unit
 val unmap : t -> unit

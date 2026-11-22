@@ -34,6 +34,7 @@
 #include <time.h>
 #include <signal.h>
 #include <pthread.h>
+#include <sys/file.h>
 
 #ifdef __QNXNTO__
 #include <sys/neutrino.h>
@@ -236,6 +237,46 @@ CAMLprim value qr_lock(value vba)
 CAMLprim value qr_base_addr(value vba)
 {
     return caml_copy_nativeint((intnat)Caml_ba_data_val(vba));
+}
+
+/* Exclusive lock for Region.recover. The lock object is a sibling shm
+   name (name + "_lk") that is never unlinked by reclaim, so two producers
+   cannot both observe a dead session and then unlink each other's
+   replacement. O_EXCL creates it once; everyone else opens the same inode
+   and blocks in flock. */
+CAMLprim value qr_session_lock(value vname)
+{
+    CAMLparam1(vname);
+    char lockname[256];
+    int fd, rc;
+    if (caml_string_length(vname) == 0
+        || (size_t)caml_string_length(vname) + 4 >= sizeof lockname) {
+        CAMLreturn(Val_long(-1));
+    }
+    memcpy(lockname, String_val(vname), caml_string_length(vname));
+    memcpy(lockname + caml_string_length(vname), "_lk", 4);
+    fd = shm_open(lockname, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 && errno == EEXIST)
+        fd = shm_open(lockname, O_RDWR, 0600);
+    if (fd < 0) CAMLreturn(Val_long(-1));
+    caml_release_runtime_system();
+    rc = flock(fd, LOCK_EX);
+    caml_acquire_runtime_system();
+    if (rc != 0) {
+        close(fd);
+        CAMLreturn(Val_long(-1));
+    }
+    CAMLreturn(Val_long(fd));
+}
+
+CAMLprim value qr_session_unlock(value vfd)
+{
+    int fd = (int)Long_val(vfd);
+    if (fd >= 0) {
+        flock(fd, LOCK_UN);
+        close(fd);
+    }
+    return Val_unit;
 }
 
 CAMLprim value qr_pid_alive(value vpid)

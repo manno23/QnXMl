@@ -102,30 +102,38 @@ let () =
               Layout.die "producer: handshake deadline connecting to consumer"
         in
         Printf.printf "producer: connected to consumer channel (coid %d)\n%!" coid;
-        let owed = ref false in
-        let pulse () =
-          Region.msg_send_pulse coid Layout.pulse_data_ready 0
+        let pulse () = Region.msg_send_pulse coid Layout.pulse_data_ready 0 in
+        let wake () =
+          Wake.arm
+            ~load:(fun () -> Region.load_int hdr Layout.consumer_asleep)
+            ~cas:(fun old now ->
+              Region.cas_int hdr Layout.consumer_asleep old now)
+            ~pulse
         in
-        let kick () =
-          let rc = Wake.send ~owed ~pulse in
-          if rc < 0 && rc <> -Region.eagain then
-            Layout.die (Printf.sprintf "producer: MsgSendPulse errno %d" (-rc));
-          if rc = -Region.eagain then Unix.sleepf 1e-4
+        let rec kick () =
+          match wake () with
+          | Wake.Awake | Wake.Pulsed -> ()
+          | Wake.Again rc when rc = -Region.eagain ->
+              Unix.sleepf 1e-4;
+              kick ()
+          | Wake.Again rc ->
+              Layout.die (Printf.sprintf "producer: MsgSendPulse errno %d" (-rc))
         in
+        (* Push, then arm. The occupancy bit is not the wakeup: the consumer
+           can drain and sleep between a nonempty observation and the push.
+           [Wake.arm] runs after the push's release of tail. *)
         let push () =
-          if Ring.occupancy ring = 0 then owed := true;
           let rec go () =
             if Ring.push ring msg then kick ()
             else begin
               kick ();
-              if not !owed then Unix.sleepf 1e-4;
+              Unix.sleepf 1e-4;
               go ()
             end
           in
           go ()
         in
         let finish () =
-          owed := true;
           kick ();
           let recv = Layout.private_slice Layout.ctl_words in
           let rcvid, nbytes = Region.msg_receive chid recv 0 Layout.ctl_words in

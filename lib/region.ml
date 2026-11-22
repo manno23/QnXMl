@@ -57,6 +57,8 @@ external unmap_raw : words -> unit = "qr_unmap"
 external lock : words -> bool = "qr_lock"
 external base_addr : words -> nativeint = "qr_base_addr"
 external pid_alive : int -> bool = "qr_pid_alive" [@@noalloc]
+external session_lock : string -> int = "qr_session_lock"
+external session_unlock : int -> unit = "qr_session_unlock"
 
 external load_int : words -> int -> int = "qr_load_int" [@@noalloc]
 external load_relaxed : words -> int -> int = "qr_load_int_relaxed" [@@noalloc]
@@ -143,6 +145,10 @@ let create ?(name = "") ?(addr = 0n) ?(epoch = 1) ?(generation = 1) ~words () =
         write_descr t ~epoch ~generation;
         Ok t
 
+let reject mem err =
+  unmap_raw mem;
+  Error err
+
 let attach ~name ?(addr = 0n) ~words () =
   if name = "" || words < descr_words then Error Too_small
   else
@@ -150,13 +156,13 @@ let attach ~name ?(addr = 0n) ~words () =
     | Error e -> Error e
     | Ok mem ->
         let mag = load_int mem d_magic in
-        if mag = 0 then Error Uninitialized
-        else if mag <> magic then Error Bad_magic
+        if mag = 0 then reject mem Uninitialized
+        else if mag <> magic then reject mem Bad_magic
         else
           let ver = load_int mem d_version in
           let sz = load_int mem d_words in
-          if ver <> layout_version then Error Bad_version
-          else if sz <> words then Error Size_mismatch
+          if ver <> layout_version then reject mem Bad_version
+          else if sz <> words then reject mem Size_mismatch
           else Ok { mem; locked = lock mem; cursor = descr_words }
 
 let unmap t = unmap_raw t.mem
@@ -173,21 +179,32 @@ let reclaim ?(addr = 0n) ~name ~epoch ~generation ~words () =
 let recover ?(addr = 0n) ~name ~epoch ~words () =
   if name = "" then Error Range
   else
-    match attach ~name ~addr ~words () with
-    | Error Not_found -> create ~name ~addr ~epoch ~words ()
-    | Error Uninitialized ->
-        reclaim ~addr ~name ~epoch ~generation:1 ~words ()
-    | Error (Bad_magic | Bad_version | Too_small | Size_mismatch) as e -> e
-    | Error e -> Error e
-    | Ok old ->
-        let creator = load_int old.mem d_epoch in
-        let gen = load_int old.mem d_generation in
-        let live = load_int old.mem d_state = state_ready && pid_alive creator in
-        unmap old;
-        if live then Error Busy
-        else
-          let generation = if gen <= 0 || gen = max_int then 1 else gen + 1 in
-          reclaim ~addr ~name ~epoch ~generation ~words ()
+    let fd = session_lock name in
+    if fd < 0 then Error Map_failed
+    else
+      (* Re-read under the lock. A creator that is still alive — even one
+         that has not published yet — owns the name. Only a dead epoch or
+         an unfinished (magic 0) object is replaced, and the unlink happens
+         before the lock is dropped. *)
+      let result =
+        match attach ~name ~addr ~words () with
+        | Error Not_found -> create ~name ~addr ~epoch ~words ()
+        | Error Uninitialized ->
+            reclaim ~addr ~name ~epoch ~generation:1 ~words ()
+        | Error (Bad_magic | Bad_version | Too_small | Size_mismatch) as e -> e
+        | Error e -> Error e
+        | Ok old ->
+            let creator = load_int old.mem d_epoch in
+            let gen = load_int old.mem d_generation in
+            let live = pid_alive creator in
+            unmap old;
+            if live then Error Busy
+            else
+              let generation = if gen <= 0 || gen = max_int then 1 else gen + 1 in
+              reclaim ~addr ~name ~epoch ~generation ~words ()
+      in
+      session_unlock fd;
+      result
 
 let publish t = store_int t.mem d_state state_ready
 let is_ready t = load_int t.mem d_state = state_ready

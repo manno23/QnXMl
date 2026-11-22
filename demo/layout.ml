@@ -22,6 +22,10 @@ let producer_pid = 0
 let producer_chid = 1
 let consumer_pid = 2
 let consumer_chid = 3
+(* 1 while the consumer may be blocked in MsgReceive. Release-stored by the
+   consumer before it rechecks the ring; the producer CAS-es it back to 0
+   and pulses. See [Wake.arm]. *)
+let consumer_asleep = 4
 
 let total_words =
   Region.descr_words + header_words + Ring.words_needed ~slots ~width
