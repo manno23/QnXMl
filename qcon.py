@@ -8,11 +8,36 @@ Protocol (documented by QNX / public research):
 Used here for legitimate dev-board access (our own image starts qconn on
 purpose, per qnx_custom_builds startup.sh) to install an ssh key.
 """
-import socket, sys, time
+import os, socket, sys, time
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.208.81"
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
-CMD = sys.argv[3]
+# Unauthenticated remote shell. A dev board that deliberately runs qconn
+# can opt in; this must never be the default and must not ship in a
+# production image (audit I7).
+if os.environ.get("QNXML_QCONN") != "1":
+    sys.stderr.write(
+        "qcon.py talks to qconn with no authentication. "
+        "Set QNXML_QCONN=1 to run it against a dev board.\n"
+    )
+    sys.exit(1)
+
+if len(sys.argv) >= 4:
+    HOST = sys.argv[1]
+    PORT = int(sys.argv[2])
+    CMD = sys.argv[3]
+else:
+    HOST = os.environ.get("QNXML_QCONN_HOST", "")
+    if len(sys.argv) == 3 and HOST:
+        PORT = int(sys.argv[1])
+        CMD = sys.argv[2]
+    else:
+        sys.stderr.write(
+            "usage: QNXML_QCONN=1 qcon.py HOST PORT CMD\n"
+            "       QNXML_QCONN=1 QNXML_QCONN_HOST=board qcon.py PORT CMD\n"
+        )
+        sys.exit(1)
+if not HOST:
+    sys.stderr.write("pass HOST, or set QNXML_QCONN_HOST\n")
+    sys.exit(1)
 
 def recv_some(s, timeout=2.0, quiet_after=0.6):
     s.settimeout(quiet_after)

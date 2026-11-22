@@ -1,66 +1,77 @@
-(* Version vector for a FIXED, known-in-advance peer set — one monotone
-   int64 counter per peer, living in the region so a delta header can be
-   MsgSent as a word-range with zero serialization.
-
-   Use: bump own component on every locally produced delta; on receipt,
-   [compare incoming local] decides accept / stale / concurrent, then
-   [merge]. Monotonicity of each component is the invariant the module
-   never lets you break: there is no [set], only [tick] and [merge].
-
-   Layout (word indices within the slice):
-     0      : n — peer count (read-only after init)
-     1–7    : padding
-     8(i+1) : counter of peer i, on its own 64-byte cache line
-
-   Padding decision (SPEC A.5): the counters ARE written by different
-   processes — peer i ticks only its own component i from a pinned core —
-   so adjacent counters would false-share exactly like Ring's head/tail.
-   A Cortex-A76 cache line is 64 bytes = 8 int64 words, so each counter
-   lives at word 8*(i+1), its own line; read-only n shares line 0
-   harmlessly.
-
-   The wire format is UNCHANGED and dense: [compare]/[merge] take an
-   incoming vector of n words in peer order, and the padding above exists
-   only in the resident copy. A peer sending its own clock packs its
-   counters into the outbound staging slice before MsgSendv. *)
-
 type t = { s : Region.words; me : int; n : int }
-
 type order = Equal | Before | After | Concurrent
+type error = Bad_peers
 
-let line_words = 8    (* one 64-byte cache line (Cortex-A76) *)
+let line_words = 8
 let n_ix = 0
 let component_ix i = line_words * (i + 1)
-
 let words_needed ~peers = line_words * (peers + 1)
 
 let init s ~peers ~me =
-  s.{n_ix} <- Int64.of_int peers;
-  for i = 0 to peers - 1 do s.{component_ix i} <- 0L done;
-  { s; me; n = peers }
+  if peers <= 0 || me < 0 || me >= peers then Error Bad_peers
+  else if words_needed ~peers > Region.dim_words s then Error Bad_peers
+  else begin
+    for i = 0 to peers - 1 do
+      Region.store_relaxed s (component_ix i) 0
+    done;
+    Region.store_int s n_ix peers;
+    Ok { s; me; n = peers }
+  end
 
-let attach s ~me = { s; me; n = Int64.to_int s.{n_ix} }
+let attach s ~me =
+  let n = Region.load_int s n_ix in
+  if n <= 0 || me < 0 || me >= n then Error Bad_peers
+  else if words_needed ~peers:n > Region.dim_words s then Error Bad_peers
+  else Ok { s; me; n }
 
-let tick t = ignore (Region.fetch_add t.s (component_ix t.me) 1L)
+let tick t = ignore (Region.fetch_add_int t.s (component_ix t.me) 1)
 
-let get t i = Region.load_acq t.s (component_ix i)
+let get t i = Region.load_int t.s (component_ix i)
 
-(* compare THIS clock against a raw incoming vector (n words) *)
-let compare t (other : Region.words) =
-  let le = ref true and ge = ref true in
-  for i = 0 to t.n - 1 do
-    let a = get t i and b = other.{i} in
-    if a < b then ge := false;
-    if a > b then le := false
-  done;
-  match !le, !ge with
-  | true, true -> Equal
-  | true, false -> Before        (* we're behind: apply the delta *)
-  | false, true -> After         (* delta is stale: drop it       *)
-  | false, false -> Concurrent   (* needs merge policy            *)
+let rec cas_max s ix b =
+  let a = Region.load_int s ix in
+  if b <= a then ()
+  else if Region.cas_int s ix a b then ()
+  else cas_max s ix b
 
-let merge t (other : Region.words) =
-  for i = 0 to t.n - 1 do
-    let a = get t i and b = other.{i} in
-    if b > a then Region.store_rel t.s (component_ix i) b
-  done
+(* Top-level so the recursive calls are not closures. A [let rec] nested
+   in [merge]/[compare] would allocate on every call. *)
+let rec merge_from t other n i =
+  if i = n then ()
+  else begin
+    cas_max t.s (component_ix i) (Region.load_relaxed other i);
+    merge_from t other n (i + 1)
+  end
+
+let merge t other = merge_from t other t.n 0
+
+let rec compare_from t other n i le ge =
+  if i = n then
+    match le, ge with
+    | 1, 1 -> Equal
+    | 1, 0 -> Before
+    | 0, 1 -> After
+    | _ -> Concurrent
+  else
+    let a = get t i in
+    let b = Region.load_relaxed other i in
+    let le = if a > b then 0 else le in
+    let ge = if a < b then 0 else ge in
+    compare_from t other n (i + 1) le ge
+
+let compare t other = compare_from t other t.n 0 1 1
+
+let pack t dst =
+  let n = t.n in
+  if Region.dim_words dst < n then false
+  else begin
+    let rec loop i =
+      if i = n then ()
+      else begin
+        Region.store_relaxed dst i (get t i);
+        loop (i + 1)
+      end
+    in
+    loop 0;
+    true
+  end

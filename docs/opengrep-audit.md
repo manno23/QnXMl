@@ -3,6 +3,32 @@
 Date: 2026-08 (opengrep 1.10.0)
 Scope: `lib/` (6 OCaml modules + 1 C stub), `demo/`, `test/`, `qcon.py` — 1,197 LOC.
 
+## Resolution status (2026-11)
+
+The findings below are the original audit. Current code addresses them as follows. Host tests cover each row that can run on Linux; QNX-only IPC is compiled behind `__QNXNTO__` and returns `-ENOTSUP` on the host.
+
+| id | status | where |
+|---|---|---|
+| E1 | **fixed** | `Vclock.merge` is a CAS-max loop; `Vclock.tick` stays `fetch_add`. A tick that linearizes after a merge is `max+1` (a later event). `Region.atomic_max_self_test` runs the same race under pthreads, because host systhreads hold the runtime lock and cannot interleave the OCaml loop. |
+| E2 | **fixed** | `MsgSendPulse` returns `-errno` (`EAGAIN` included). `Wake.send` coalesces to one successful pulse per empty→nonempty debt. The producer backs off instead of raising. |
+| W1 | **fixed** | Attach `fstat`s and returns `Too_small` when `st_size` is short. No touch past the object. |
+| W2 | **fixed** | Create is `O_CREAT\|O_EXCL`. An existing object is `Exists` and is not `ftruncate`d. `ftruncate` runs only on the brand-new fd. The syntactic opengrep rule still matches that `ftruncate` call; the unsafe "resize a live object" path is gone. |
+| W3 | **fixed** | Nonzero `addr` uses `MAP_FIXED_NOREPLACE`, or `Fixed_unsupported` where that flag does not exist. No silent `MAP_FIXED` clobber. |
+| W4 | **fixed** | `MsgSendv`'s reply iov is the caller-supplied bigarray. The demo prints the ack word. The syntactic rule still matches the `MsgSendv` call itself. |
+| W5 | **fixed** | `Ring.attach` rejects non-positive cap/width or a slice that cannot hold them. |
+| W6 | **fixed** | `Merkle.update` release-stores the root last; `root` / `proof` acquire-load it first. Single writer. |
+| W7 | **fixed** | Runmask shift is range-checked before the shift. |
+| I1 | **fixed** | Hot paths do not box. `test/test.ml` asserts `Gc.minor_words` delta 0 and 0 minor collections for Ring push+pop, Arena alloc/free, Pmap set, Pmap find, Vclock tick/compare/merge, and Merkle update. |
+| I2 | **documented** | Counters are 63-bit OCaml ints on purpose (`ring.mli`, `region.mli`). Not widened. |
+| I3 | **fixed** | `Retry.until` plus producer/consumer deadlines. A dead creator is not "ready". |
+| I4 | **already gone** | No zero-length `memset` in `region_stubs.c`. |
+| I5 | **fixed** | Arena free CAS-es an allocated flag; double-free and out-of-range free return false. |
+| I6 | **fixed** | `Vclock.pack` writes the dense wire vector. `compare`/`merge` still take that dense form. |
+| I7 | **fixed** | `qcon.py` exits unless `QNXML_QCONN=1`. Host comes from argv or `QNXML_QCONN_HOST`. |
+| stale session (`shell-capture.txt` `Failure("ConnectAttach")`) | **fixed** | `connect_attach` returns `-errno`. The consumer unmaps and retries until the handshake deadline. `Region.recover` replaces a region whose epoch pid is dead and refuses one whose creator is still alive. |
+
+Pmap readers must not hold a root across a concurrent `set` that retires it. There is no epoch reclamation yet; the mli states that quiescence contract. VWC itself is still interfaces only.
+
 ## Method
 
 | source | what | result |

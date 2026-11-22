@@ -92,15 +92,15 @@ the **`qnx_ocaml`** substrate provides the foundational, zero-allocation data st
 |---|---|---|
 | **`region`** | pre-faulted shared-memory mapping | monotone bump allocator at init; zero page faults during steady state. |
 | **`ring`** | bounded spsc ring buffer | wait-free push/pop via acquire/release atomic fences (`qr_load_acq`/`qr_store_rel`). |
-| **`arena`** | fixed-capacity node pool | o(1) allocation and recycling via an intrusive free list; hard memory bounds. |
-| **`pmap`** | persistent treap with sliding window | bounded-window copy-log recycling reconciles path-copying persistence with fixed arenas without gc tracing. |
+| **`arena`** | fixed-capacity node pool | o(1) alloc/free. the free list and in-use count sit in the slab; `attach` shares them across processes. |
+| **`pmap`** | persistent treap with sliding window | path-copy log and version window live in the slab, so a peer can `attach` the same history. |
 | **`vclock`** | region-backed version vector | monotone peer counters for causality tracking across distributed cores. |
 | **`merkle`** | implicit heap hash tree | o(log n) delta re-hashing; 1-word cross-node state consistency verification. |
 
 ### memory management & determinism on qnx
 
 1. **zero-heap steady state (gc elimination)**:
-   all operational data lives in off-heap, preallocated `bigarray` slabs of `int64` words. because steady-state execution allocates no ocaml heap blocks, the ocaml gc has zero work to collect and remains completely idle during operation.
+   operational data lives in off-heap, preallocated `bigarray` slabs of `int64` words. counters cross the ffi as unboxed ocaml ints and payload copies stay in c, so a steady-state loop allocates no ocaml heap. `test/test.ml` asserts that `Gc.minor_words` does not move for ring push/pop, arena alloc/free, pmap set, pmap find, vclock tick/compare/merge, and merkle update. that is the contract, not a slogan.
 2. **offset-based handle addressing**:
    word indices and `opaqueref` handles are region-relative integer offsets rather than absolute virtual addresses. this allows processes with differing aslr mappings to safely share structures without pointer translation or relocation tables.
 3. **zero-copy kernel ipc (`msgsendv` / `msgreplyv`)**:
@@ -115,29 +115,30 @@ the **`qnx_ocaml`** substrate provides the foundational, zero-allocation data st
 ```text
 qnxml/
 ├── dune-project          # declares packages: qnx_ocaml and vwc_ocaml
-├── makefile              # unified make targets (host, target, demo, test)
-├── .envrc                # ocaml 5.3.0 switch + qnx sdp 8.0 environment
-├── qcon.py               # qnx target deployment & test harness
+├── makefile              # host, target, demo, test, opengrep
+├── .github/workflows/    # linux ci: build + the allocation-budget test
+├── .envrc                # opam switch + qnx sdp paths (override with env)
+├── qcon.py               # optional qconn client; requires QNXML_QCONN=1
 │
-├── lib/                  # layer 0/1: qnx_ocaml substrate primitives
-│   ├── region.ml / .mli  # pre-faulted shm slabs & bump carving
-│   ├── region_stubs.c    # qnx ipc (msgsendv/receive), atomics, shm bindings
-│   ├── ring.ml           # wait-free spsc ring
-│   ├── arena.ml          # fixed-pool intrusive allocator
-│   ├── pmap.ml           # copy-log persistent treap
-│   ├── vclock.ml         # region version vector
-│   └── merkle.ml         # in-slab hash tree
+├── lib/                  # qnx_ocaml substrate (each module has an .mli)
+│   ├── region.ml/.mli    # slab, layout descriptor, atomics, qnx ipc
+│   ├── region_stubs.c
+│   ├── ring.ml/.mli      # wait-free spsc ring
+│   ├── arena.ml/.mli     # in-slab free list
+│   ├── pmap.ml/.mli      # in-slab persistent treap
+│   ├── vclock.ml/.mli    # region version vector
+│   ├── merkle.ml/.mli    # in-slab hash tree
+│   ├── wake.ml/.mli      # coalesced pulses
+│   └── retry.ml/.mli     # handshake deadlines
 │
-├── vwc/                  # layer 2: vwc_ocaml subsystem (virtual working copy)
-│   ├── lib/              # core interfaces: opref, grant, writelog, filetable, ipc
-│   ├── docs/             # vwc-srs-001 requirements, trace matrix, impl specs
-│   ├── poc/              # proof-of-concept executables (poc1..poc3)
-│   ├── test/             # srs requirement verification tests
-│   └── vendor/           # vendored lmdb engine for qnx aarch64
+├── vwc/                  # vwc_ocaml: interfaces and specs, no implementation yet
+│   ├── lib/              # opref, grant, writelog, filetable, region, ipc (.mli only)
+│   ├── docs/             # vwc-srs-001, trace matrix, impl specs
+│   └── vendor/           # vendored lmdb (store decision: lmdb, not sqlite)
 │
-├── demo/                 # two-process shm demo over qnx channel/pulse plane
-├── docs/                 # substrate specifications & cross-compilation guides
-└── test/                 # substrate unit tests & benchmarks
+├── demo/                 # two-process shm demo; host polls, qnx uses pulses
+├── docs/                 # spec, audit, cross-compilation notes
+└── test/                 # correctness, fork, and the zero-allocation budget
 ```
 
 ---
@@ -145,11 +146,12 @@ qnxml/
 ## 5. building & verification
 
 ### host build (linux)
-run unit tests and the spsc shared-memory demo:
+run unit tests (including the allocation budget and the fork test) and the spsc demo:
 ```bash
-make host    # runs dune build & dune test across all workspace packages
-make demo    # launches producer/consumer processes over shared memory
+make host    # dune build && dune test
+make demo    # producer/consumer over shared memory; polls on linux
 ```
+github actions runs the same host build on pushes and pull requests. qnx ipc is not executed there; those stubs compile out to explicit "not supported" results.
 
 ### qnx target cross-compilation (raspberry pi 5 / aarch64)
 cross-compiles against qnx sdp 8.0:

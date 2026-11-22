@@ -1,139 +1,230 @@
-(* Persistent int64->int64 map: a treap with path copying, nodes pooled in
-   an Arena, versions kept in a sliding window.
+(* Node: key | value | prio | left | right. Priority is splitmix(key). *)
 
-   Persistence: [set] copies the root-to-key path (expected O(log n) fresh
-   nodes), so every retained version's tree is intact and lookups against
-   old versions cost nothing extra.
+let k_ = 0 and v_ = 1 and p_ = 2 and l_ = 3 and r_ = 4
+let node_words = 5
+let nil = -1
 
-   Retirement (the part that reconciles persistence with preallocation):
-   while building version v+1 we LOG the index of every node we copied
-   from — those nodes belong to versions <= v and to no newer version, so
-   the moment v is the oldest retained version and retires, v+1's log is
-   exactly the garbage set. Freeing it is O(nodes actually replaced), not
-   O(tree). Bounded history + bounded arena = bounded memory, by
-   construction rather than by GC.
+let magic = 0x504D4150 (* "PMAP" *)
+let version_magic = 1
+let header = 16
+let slot_words = 4
 
-   Node layout (5 words): 0 key | 1 value | 2 prio | 3 left | 4 right.
-   Treap priority = hash(key): deterministic, expected-balanced, no RNG
-   state to manage. *)
-
-type version = {
-  id : int;
-  root : int;
-  replaced : int list;   (* nodes this version copied over *)
-}
+let s_magic = 0
+let s_version = 1
+let s_retention = 2
+let s_capacity = 3
+let s_next = 4
+let s_live = 5
+let s_newest = 6
+let s_log = 7
 
 type t = {
   a : Arena.t;
-  mutable versions : version list;  (* newest first *)
-  mutable next_id : int;
+  meta : Region.words;
   retention : int;
+  capacity : int;
+  slots : int;
+  repl : int;
 }
 
-let nil = Arena.nil
-let k_ = 0 and v_ = 1 and p_ = 2 and l_ = 3 and r_ = 4
+type error = Bad_magic | Bad_version | Bad_size | Truncated
 
-let node_words = 5
+let words_needed ~retention ~capacity =
+  header + (retention * slot_words) + capacity
 
-(* splitmix64 finalizer as priority hash *)
-let prio_of key =
-  let open Int64 in
-  let z = add key 0x9E3779B97F4A7C15L in
-  let z = mul (logxor z (shift_right_logical z 30)) 0xBF58476D1CE4E5B9L in
-  let z = mul (logxor z (shift_right_logical z 27)) 0x94D049BB133111EBL in
-  logxor z (shift_right_logical z 31)
+let slot_base t slot = t.slots + (slot * slot_words)
 
-let create arena ~retention =
-  { a = arena; versions = [ { id = 0; root = nil; replaced = [] } ];
-    next_id = 1; retention }
+let create a meta ~retention =
+  let capacity = Arena.capacity a in
+  if retention < 2 || capacity <= 0 then Error Bad_size
+  else if Arena.node_words a <> node_words then Error Bad_size
+  else if words_needed ~retention ~capacity > Region.dim_words meta then
+    Error Bad_size
+  else begin
+    let slots = header in
+    let repl = header + (retention * slot_words) in
+    for i = 0 to capacity - 1 do
+      Region.store_relaxed meta (repl + i) nil
+    done;
+    Region.store_relaxed meta slots 0;
+    Region.store_relaxed meta (slots + 1) nil;
+    Region.store_relaxed meta (slots + 2) nil;
+    Region.store_relaxed meta s_version version_magic;
+    Region.store_relaxed meta s_retention retention;
+    Region.store_relaxed meta s_capacity capacity;
+    Region.store_relaxed meta s_next 1;
+    Region.store_relaxed meta s_live 1;
+    Region.store_relaxed meta s_newest 0;
+    Region.store_relaxed meta s_log nil;
+    Region.store_int meta s_magic magic;
+    Ok { a; meta; retention; capacity; slots; repl }
+  end
+
+let attach a meta =
+  if Region.dim_words meta < header then Error Truncated
+  else if Region.load_int meta s_magic <> magic then Error Bad_magic
+  else if Region.load_int meta s_version <> version_magic then Error Bad_version
+  else
+    let retention = Region.load_int meta s_retention in
+    let capacity = Region.load_int meta s_capacity in
+    if retention < 2 || capacity <> Arena.capacity a then Error Bad_size
+    else if Arena.node_words a <> node_words then Error Bad_size
+    else if words_needed ~retention ~capacity > Region.dim_words meta then
+      Error Truncated
+    else
+      Ok {
+        a;
+        meta;
+        retention;
+        capacity;
+        slots = header;
+        repl = header + (retention * slot_words);
+      }
 
 let mk t key value left right =
   let i = Arena.alloc t.a in
-  Arena.set t.a i k_ key;
-  Arena.set t.a i v_ value;
-  Arena.set t.a i p_ (prio_of key);
-  Arena.seti t.a i l_ left;
-  Arena.seti t.a i r_ right;
-  i
-
-(* copy an existing node; caller mutates the fresh copy freely *)
-let dup t i log =
-  let j = Arena.alloc t.a in
-  for f = 0 to node_words - 1 do Arena.set t.a j f (Arena.get t.a i f) done;
-  log := i :: !log;
-  j
-
-(* Insert with path copying + treap rotations. Every node we touch is a
-   fresh copy, so rotations mutate only nodes invisible to old versions. *)
-let rec ins t node key value log =
-  if node = nil then mk t key value nil nil
+  if i < 0 then nil
   else begin
-    let nk = Arena.get t.a node k_ in
-    if key = nk then begin
-      let n' = dup t node log in
-      Arena.set t.a n' v_ value; n'
-    end else if key < nk then begin
-      let l' = ins t (Arena.geti t.a node l_) key value log in
-      let n' = dup t node log in
-      Arena.seti t.a n' l_ l';
-      if Arena.get t.a l' p_ > Arena.get t.a n' p_ then begin
-        (* rotate right: l' becomes parent *)
-        Arena.seti t.a n' l_ (Arena.geti t.a l' r_);
-        Arena.seti t.a l' r_ n';
-        l'
-      end else n'
-    end else begin
-      let r' = ins t (Arena.geti t.a node r_) key value log in
-      let n' = dup t node log in
-      Arena.seti t.a n' r_ r';
-      if Arena.get t.a r' p_ > Arena.get t.a n' p_ then begin
-        Arena.seti t.a n' r_ (Arena.geti t.a r' l_);
-        Arena.seti t.a r' l_ n';
-        r'
-      end else n'
-    end
+    Arena.store_int64 t.a i k_ key;
+    Arena.store_int64 t.a i v_ value;
+    Arena.store_mix t.a i p_ key;
+    Arena.set_int t.a i l_ left;
+    Arena.set_int t.a i r_ right;
+    i
   end
 
-let newest t = List.hd t.versions
+let dup t node =
+  let j = Arena.alloc t.a in
+  if j < 0 then nil
+  else if not (Arena.copy_node t.a j node) then nil
+  else begin
+    let head = Region.load_relaxed t.meta s_log in
+    Region.store_relaxed t.meta (t.repl + node) head;
+    Region.store_relaxed t.meta s_log node;
+    j
+  end
 
-let retire_oldest t =
-  match List.rev t.versions with
-  | oldest :: rest_rev when rest_rev <> [] ->
-      let successor = List.hd rest_rev in
-      (* nodes copied over while making [successor] are referenced only by
-         versions <= oldest — all gone after this call: free them *)
-      List.iter (Arena.free t.a) successor.replaced;
-      t.versions <- List.rev rest_rev;
-      ignore oldest
-  | _ -> ()
+let rec ins t node key value =
+  if node < 0 then mk t key value nil nil
+  else
+    let c = Arena.cmp_int64 t.a node k_ key in
+    if c = 0 then
+      let n' = dup t node in
+      if n' < 0 then nil
+      else begin
+        Arena.store_int64 t.a n' v_ value;
+        n'
+      end
+    else if c > 0 then
+      let l' = ins t (Arena.get_int t.a node l_) key value in
+      if l' < 0 then nil
+      else
+        let n' = dup t node in
+        if n' < 0 then nil
+        else begin
+          Arena.set_int t.a n' l_ l';
+          if Arena.cmp_fields t.a l' p_ n' p_ > 0 then begin
+            Arena.set_int t.a n' l_ (Arena.get_int t.a l' r_);
+            Arena.set_int t.a l' r_ n';
+            l'
+          end else n'
+        end
+    else
+      let r' = ins t (Arena.get_int t.a node r_) key value in
+      if r' < 0 then nil
+      else
+        let n' = dup t node in
+        if n' < 0 then nil
+        else begin
+          Arena.set_int t.a n' r_ r';
+          if Arena.cmp_fields t.a r' p_ n' p_ > 0 then begin
+            Arena.set_int t.a n' r_ (Arena.get_int t.a r' l_);
+            Arena.set_int t.a r' l_ n';
+            r'
+          end else n'
+        end
 
-(* [set] creates and publishes a new version; returns its id. *)
-let set t key value =
-  let log = ref [] in
-  let root' = ins t (newest t).root key value log in
-  let id = t.next_id in
-  t.next_id <- id + 1;
-  t.versions <- { id; root = root'; replaced = !log } :: t.versions;
-  if List.length t.versions > t.retention then retire_oldest t;
-  id
+let root_at t slot = Region.load_relaxed t.meta (slot_base t slot + 1)
+
+let newest_slot t = Region.load_int t.meta s_newest
+
+let rec scan_version t version slot left =
+  if left = 0 then -2
+  else
+    let b = slot_base t slot in
+    let id = Region.load_relaxed t.meta b in
+    if id = version then Region.load_relaxed t.meta (b + 1)
+    else
+      let prev = if slot = 0 then t.retention - 1 else slot - 1 in
+      scan_version t version prev (left - 1)
+
+let root_for t version =
+  let newest = newest_slot t in
+  if version < 0 then root_at t newest
+  else scan_version t version newest (Region.load_int t.meta s_live)
 
 let rec find_node t node key =
-  if node = nil then None
+  if node < 0 then nil
   else
-    let nk = Arena.get t.a node k_ in
-    if key = nk then Some (Arena.get t.a node v_)
-    else if key < nk then find_node t (Arena.geti t.a node l_) key
-    else find_node t (Arena.geti t.a node r_) key
+    let c = Arena.cmp_int64 t.a node k_ key in
+    if c = 0 then node
+    else if c > 0 then find_node t (Arena.get_int t.a node l_) key
+    else find_node t (Arena.get_int t.a node r_) key
 
-let find ?version t key =
-  let v =
-    match version with
-    | None -> newest t
-    | Some id ->
-        (try List.find (fun v -> v.id = id) t.versions
-         with Not_found -> failwith "version retired")
-  in
-  find_node t v.root key
+let version_arg = function None -> -1 | Some v -> v
 
-let live_versions t = List.map (fun v -> v.id) t.versions
-let nodes_in_use t = t.a.Arena.in_use
+let mem ?version t key =
+  let root = root_for t (version_arg version) in
+  root <> -2 && find_node t root key >= 0
+
+let find_eq ?version t key value =
+  let root = root_for t (version_arg version) in
+  if root = -2 then false
+  else
+    let n = find_node t root key in
+    n >= 0 && Arena.cmp_int64 t.a n v_ value = 0
+
+let has_version t id = root_for t id <> -2
+
+let live_count t = Region.load_int t.meta s_live
+let nodes_in_use t = Arena.in_use t.a
+
+let rec free_log t n fuel =
+  if n < 0 || fuel = 0 then ()
+  else
+    let next = Region.load_relaxed t.meta (t.repl + n) in
+    ignore (Arena.free t.a n);
+    free_log t next (fuel - 1)
+
+let retire t =
+  let live = Region.load_relaxed t.meta s_live in
+  if live <= 1 then ()
+  else
+    let newest = Region.load_relaxed t.meta s_newest in
+    let oldest = (newest - live + 1 + t.retention) mod t.retention in
+    let succ = (oldest + 1) mod t.retention in
+    let repl = Region.load_relaxed t.meta (slot_base t succ + 2) in
+    free_log t repl t.capacity;
+    Region.store_int t.meta s_live (live - 1)
+
+let set t key value =
+  Region.store_relaxed t.meta s_log nil;
+  let root0 = root_for t (-1) in
+  let root' = ins t root0 key value in
+  if root' < 0 then nil
+  else
+    let id = Region.fetch_add_int t.meta s_next 1 in
+    if Region.load_relaxed t.meta s_live = t.retention then retire t;
+    let newest = Region.load_relaxed t.meta s_newest in
+    let slot = (newest + 1) mod t.retention in
+    let repl = Region.load_relaxed t.meta s_log in
+    let live = Region.load_relaxed t.meta s_live in
+    let b = slot_base t slot in
+    Region.store_relaxed t.meta b id;
+    Region.store_relaxed t.meta (b + 1) root';
+    Region.store_relaxed t.meta (b + 2) repl;
+    (* Newest slot, then the live count. Both release, so a reader that
+       acquire-loads newest sees the slot body. *)
+    Region.store_int t.meta s_newest slot;
+    Region.store_int t.meta s_live (live + 1);
+    id

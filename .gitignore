@@ -37,7 +37,11 @@ setup.log
 # Local OPAM switch
 _opam/
 
-# pi agent tooling state
-.pi/
-_build_opt/
-_build_unopt/
+# pi agent tooling — keep authored docs, ignore generated session state
+.pi/*
+!.pi/AGENTS.md
+!.pi/LOCAL_SESSION_PROMPT.md
+!.pi/**/*.md
+
+# scan logs
+semgrep.out

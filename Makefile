@@ -21,7 +21,9 @@ target:
 # copy so the C parser sees the whole file (tree-sitter chokes on the
 # `CAMLprim value` token pair); the original is excluded to avoid dupes.
 # JSON + SARIF copies land under tools/opengrep/ for CI / review.
-OPENGREP_RULES ?= /home/jm/data/qnx/.opengrep-rules
+# Community rule checkout. Override OPENGREP_RULES, or set QNX_ROOT.
+QNX_ROOT ?= $(HOME)/data/qnx
+OPENGREP_RULES ?= $(QNX_ROOT)/.opengrep-rules
 OPENGREP_OUT ?= tools/opengrep
 opengrep:
 	@sed 's/^CAMLprim value/static value/' lib/region_stubs.c > /tmp/qnxml_stubs_scan.c
