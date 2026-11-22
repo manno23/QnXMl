@@ -39,7 +39,12 @@ let idx_of w =
   if u = idx_mask then -1 else u
 
 let words_needed ~capacity ~node_words =
-  header_words + capacity + (capacity * node_words)
+  if capacity <= 0 || node_words <= 0 || capacity >= idx_mask then 0
+  else if node_words > max_int - 1 then 0
+  else
+    let stride = node_words + 1 in
+    if capacity > (max_int - header_words) / stride then 0
+    else header_words + (capacity * stride)
 
 let node_off t i = t.nodes_base + (i * t.node_words)
 let flag_off t i = t.flags_base + i
@@ -60,11 +65,8 @@ let copy_node t dst src =
   Region.copy_words t.s (node_off t dst) t.s (node_off t src) t.node_words
 
 let create s ~capacity ~node_words =
-  if capacity <= 0 || node_words <= 0 || capacity >= idx_mask then
-    Error Bad_size
-  else
-    let need = words_needed ~capacity ~node_words in
-    if need > Region.dim_words s then Error Bad_size
+  let need = words_needed ~capacity ~node_words in
+  if need = 0 || need > Region.dim_words s then Error Bad_size
     else begin
       let flags_base = header_words in
       let nodes_base = header_words + capacity in
@@ -93,10 +95,9 @@ let attach s =
     let node_words = Region.load_int s f_node_words in
     let flags_base = Region.load_int s f_flags in
     let nodes_base = Region.load_int s f_nodes in
-    if capacity <= 0 || node_words <= 0 || capacity >= idx_mask then
-      Error Bad_size
-    else if words_needed ~capacity ~node_words > Region.dim_words s then
-      Error Truncated
+    let need = words_needed ~capacity ~node_words in
+    if need = 0 then Error Bad_size
+    else if need > Region.dim_words s then Error Truncated
     else if flags_base <> header_words || nodes_base <> header_words + capacity
     then Error Bad_size
     else Ok { s; capacity; node_words; flags_base; nodes_base }

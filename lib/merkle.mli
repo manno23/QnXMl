@@ -3,8 +3,10 @@
 
     [update] runs entirely in C: splitmix the leaf, rehash the path, and
     release-store the root (word 1) last. [root] acquire-loads that word.
-    A reader must acquire the root before reading children; otherwise a
-    concurrent update can tear. Single writer.
+    That publishes the digest. A [proof] walks children after the acquire
+    and is only a consistent snapshot while the writer is quiescent; a
+    concurrent [update] can change a child the walk has not yet read.
+    Single writer.
 
     The mixer detects divergence between trusting peers. It is not a
     collision-resistant hash.

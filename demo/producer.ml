@@ -85,7 +85,23 @@ let () =
         Region.store_int hdr Layout.producer_pid (Unix.getpid ());
         Region.publish r;
         print_endline "producer: host build — polling fallback (no pulses)";
-        (push_host, fun () -> ())
+        (* Stay alive until the ring is empty. A stream that fits in the
+           ring would otherwise exit before the consumer attaches, and the
+           consumer would reject the now-dead creator. *)
+        let wait_drain () =
+          let deadline = Region.monotonic () +. Layout.handshake_timeout in
+          let rec go () =
+            if Ring.occupancy ring = 0 then ()
+            else if Region.monotonic () >= deadline then
+              Layout.die "producer: deadline waiting for the consumer to drain"
+            else begin
+              Unix.sleepf 0.001;
+              go ()
+            end
+          in
+          go ()
+        in
+        (push_host, wait_drain)
     | Error (`os e) ->
         Layout.die (Printf.sprintf "producer: ChannelCreate failed (errno %d)" e)
     | Ok chid ->

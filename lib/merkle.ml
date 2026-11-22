@@ -8,11 +8,12 @@ external root_c : Region.words -> int64 = "qr_merkle_root"
 external mix : int64 -> int64 = "qr_mix64"
 external mix2 : int64 -> int64 -> int64 = "qr_mix2"
 
-let words_needed ~leaves = 2 * leaves
+let words_needed ~leaves =
+  if leaves <= 0 || leaves > max_int / 2 then 0 else leaves * 2
 
 let init s ~leaves =
-  if leaves <= 0 || words_needed ~leaves > Region.dim_words s then
-    Error Bad_leaves
+  let need = words_needed ~leaves in
+  if need = 0 || need > Region.dim_words s then Error Bad_leaves
   else begin
     init_c s leaves;
     Ok { s; leaves }
@@ -24,7 +25,9 @@ let update t j value =
 let root t = root_c t.s
 
 let proof t j =
-  let _acquire = root t in
+  if j < 0 || j >= t.leaves then []
+  else
+    let _acquire = root t in
   let rec up i acc =
     if i <= 1 then List.rev acc
     else

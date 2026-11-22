@@ -5,11 +5,14 @@ type error = Bad_peers
 let line_words = 8
 let n_ix = 0
 let component_ix i = line_words * (i + 1)
-let words_needed ~peers = line_words * (peers + 1)
+let words_needed ~peers =
+  if peers <= 0 || peers >= max_int / line_words then 0
+  else line_words * (peers + 1)
 
 let init s ~peers ~me =
-  if peers <= 0 || me < 0 || me >= peers then Error Bad_peers
-  else if words_needed ~peers > Region.dim_words s then Error Bad_peers
+  let need = words_needed ~peers in
+  if need = 0 || me < 0 || me >= peers then Error Bad_peers
+  else if need > Region.dim_words s then Error Bad_peers
   else begin
     for i = 0 to peers - 1 do
       Region.store_relaxed s (component_ix i) 0
@@ -19,10 +22,13 @@ let init s ~peers ~me =
   end
 
 let attach s ~me =
-  let n = Region.load_int s n_ix in
-  if n <= 0 || me < 0 || me >= n then Error Bad_peers
-  else if words_needed ~peers:n > Region.dim_words s then Error Bad_peers
-  else Ok { s; me; n }
+  if Region.dim_words s <= n_ix then Error Bad_peers
+  else
+    let n = Region.load_int s n_ix in
+    let need = words_needed ~peers:n in
+    if need = 0 || me < 0 || me >= n then Error Bad_peers
+    else if need > Region.dim_words s then Error Bad_peers
+    else Ok { s; me; n }
 
 let tick t = ignore (Region.fetch_add_int t.s (component_ix t.me) 1)
 

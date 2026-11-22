@@ -14,10 +14,16 @@ let s_version = 1
 let s_retention = 2
 let s_capacity = 3
 let s_next = 4
-let s_live = 5
-let s_newest = 6
 let s_log = 7
+(* One release-published word: low 31 bits = newest slot, high bits = live
+   count. Readers acquire-load it once so they never see a newest index
+   paired with a stale live count. *)
+let s_window = 6
 let s_alloc = 9 (* intrusive stack of nodes allocated by the in-flight set *)
+let win_mask = (1 lsl 31) - 1
+let pack_win newest live = (live lsl 31) lor (newest land win_mask)
+let win_newest w = w land win_mask
+let win_live w = w lsr 31
 
 type t = {
   a : Arena.t;
@@ -31,16 +37,19 @@ type t = {
 type error = Bad_magic | Bad_version | Bad_size | Truncated
 
 let words_needed ~retention ~capacity =
-  header + (retention * slot_words) + capacity
+  if retention < 2 || capacity <= 0 then 0
+  else if retention > win_mask || capacity > win_mask then 0
+  else if capacity > max_int - header then 0
+  else if retention > (max_int - header - capacity) / slot_words then 0
+  else header + (retention * slot_words) + capacity
 
 let slot_base t slot = t.slots + (slot * slot_words)
 
 let create a meta ~retention =
   let capacity = Arena.capacity a in
-  if retention < 2 || capacity <= 0 then Error Bad_size
-  else if Arena.node_words a <> node_words then Error Bad_size
-  else if words_needed ~retention ~capacity > Region.dim_words meta then
-    Error Bad_size
+  let need = words_needed ~retention ~capacity in
+  if need = 0 || Arena.node_words a <> node_words then Error Bad_size
+  else if need > Region.dim_words meta then Error Bad_size
   else begin
     let slots = header in
     let repl = header + (retention * slot_words) in
@@ -54,9 +63,8 @@ let create a meta ~retention =
     Region.store_relaxed meta s_retention retention;
     Region.store_relaxed meta s_capacity capacity;
     Region.store_relaxed meta s_next 1;
-    Region.store_relaxed meta s_live 1;
-    Region.store_relaxed meta s_newest 0;
     Region.store_relaxed meta s_log nil;
+    Region.store_int meta s_window (pack_win 0 1);
     Region.store_relaxed meta s_alloc nil;
     Region.store_int meta s_magic magic;
     Ok { a; meta; retention; capacity; slots; repl }
@@ -69,10 +77,10 @@ let attach a meta =
   else
     let retention = Region.load_int meta s_retention in
     let capacity = Region.load_int meta s_capacity in
-    if retention < 2 || capacity <> Arena.capacity a then Error Bad_size
-    else if Arena.node_words a <> node_words then Error Bad_size
-    else if words_needed ~retention ~capacity > Region.dim_words meta then
-      Error Truncated
+    let need = words_needed ~retention ~capacity in
+    if need = 0 || capacity <> Arena.capacity a || Arena.node_words a <> node_words
+    then Error Bad_size
+    else if need > Region.dim_words meta then Error Truncated
     else
       Ok {
         a;
@@ -172,8 +180,6 @@ let rec ins t node key value =
 
 let root_at t slot = Region.load_relaxed t.meta (slot_base t slot + 1)
 
-let newest_slot t = Region.load_int t.meta s_newest
-
 let rec scan_version t version slot left =
   if left = 0 then -2
   else
@@ -185,9 +191,10 @@ let rec scan_version t version slot left =
       scan_version t version prev (left - 1)
 
 let root_for t version =
-  let newest = newest_slot t in
+  let w = Region.load_int t.meta s_window in
+  let newest = win_newest w in
   if version < 0 then root_at t newest
-  else scan_version t version newest (Region.load_int t.meta s_live)
+  else scan_version t version newest (win_live w)
 
 let rec find_node t node key =
   if node < 0 then nil
@@ -210,9 +217,9 @@ let find_eq ?version t key value =
     let n = find_node t root key in
     n >= 0 && Arena.cmp_int64 t.a n v_ value = 0
 
-let has_version t id = root_for t id <> -2
+let has_version t id = id >= 0 && root_for t id <> -2
 
-let live_count t = Region.load_int t.meta s_live
+let live_count t = win_live (Region.load_int t.meta s_window)
 let nodes_in_use t = Arena.in_use t.a
 
 let rec free_log t n fuel =
@@ -221,17 +228,6 @@ let rec free_log t n fuel =
     let next = Region.load_relaxed t.meta (t.repl + n) in
     ignore (Arena.free t.a n);
     free_log t next (fuel - 1)
-
-let retire t =
-  let live = Region.load_relaxed t.meta s_live in
-  if live <= 1 then ()
-  else
-    let newest = Region.load_relaxed t.meta s_newest in
-    let oldest = (newest - live + 1 + t.retention) mod t.retention in
-    let succ = (oldest + 1) mod t.retention in
-    let repl = Region.load_relaxed t.meta (slot_base t succ + 2) in
-    free_log t repl t.capacity;
-    Region.store_int t.meta s_live (live - 1)
 
 let set t key value =
   Region.store_relaxed t.meta s_log nil;
@@ -243,17 +239,26 @@ let set t key value =
     nil
   end else
     let id = Region.fetch_add_int t.meta s_next 1 in
-    if Region.load_relaxed t.meta s_live = t.retention then retire t;
-    let newest = Region.load_relaxed t.meta s_newest in
+    let w = Region.load_relaxed t.meta s_window in
+    let newest = win_newest w in
+    let live0 = win_live w in
+    (* Retire before publishing. The window word is stored once, after the
+       new slot body, so a reader cannot observe the new slot index with
+       the old live count. *)
+    let live =
+      if live0 = t.retention && live0 > 1 then begin
+        let oldest = (newest - live0 + 1 + t.retention) mod t.retention in
+        let succ = (oldest + 1) mod t.retention in
+        let repl = Region.load_relaxed t.meta (slot_base t succ + 2) in
+        free_log t repl t.capacity;
+        live0 - 1
+      end else live0
+    in
     let slot = (newest + 1) mod t.retention in
     let repl = Region.load_relaxed t.meta s_log in
-    let live = Region.load_relaxed t.meta s_live in
     let b = slot_base t slot in
     Region.store_relaxed t.meta b id;
     Region.store_relaxed t.meta (b + 1) root';
     Region.store_relaxed t.meta (b + 2) repl;
-    (* Newest slot, then the live count. Both release, so a reader that
-       acquire-loads newest sees the slot body. *)
-    Region.store_int t.meta s_newest slot;
-    Region.store_int t.meta s_live (live + 1);
+    Region.store_int t.meta s_window (pack_win slot (live + 1));
     id

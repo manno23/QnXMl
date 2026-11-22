@@ -16,7 +16,7 @@ The findings below are the original audit. Current code addresses them as follow
 | W3 | **fixed** | Nonzero `addr` uses `MAP_FIXED_NOREPLACE`, or `Fixed_unsupported` where that flag does not exist. No silent `MAP_FIXED` clobber. |
 | W4 | **fixed** | `MsgSendv`'s reply iov is the caller-supplied bigarray. The demo prints the ack word. The syntactic rule still matches the `MsgSendv` call itself. |
 | W5 | **fixed** | `Ring.attach` rejects non-positive cap/width or a slice that cannot hold them. |
-| W6 | **fixed** | `Merkle.update` release-stores the root last; `root` / `proof` acquire-load it first. Single writer. |
+| W6 | **fixed** | `Merkle.update` release-stores the root last; `root` acquire-loads it. A proof walks children afterward and is consistent only while the writer is quiescent (`merkle.mli`), not as a concurrent snapshot. |
 | W7 | **fixed** | Runmask shift is range-checked before the shift. |
 | I1 | **fixed** | Hot paths do not box. `test/test.ml` asserts `Gc.minor_words` delta 0 and 0 minor collections for Ring push+pop, Arena alloc/free, Pmap set, Pmap find, Vclock tick/compare/merge, and Merkle update. |
 | I2 | **documented** | Counters are 63-bit OCaml ints on purpose (`ring.mli`, `region.mli`). Not widened. |

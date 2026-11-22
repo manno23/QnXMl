@@ -7,7 +7,10 @@ let cap_ix = 9
 let width_ix = 10
 let header_words = 11
 
-let words_needed ~slots ~width = header_words + (slots * width)
+let words_needed ~slots ~width =
+  if slots <= 0 || width <= 0 then 0
+  else if slots > (max_int - header_words) / width then 0
+  else header_words + (slots * width)
 
 let fits ~slots ~width ~dim =
   slots > 0 && width > 0

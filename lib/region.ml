@@ -56,6 +56,7 @@ external unlink : string -> unit = "qr_unlink"
 external unmap_raw : words -> unit = "qr_unmap"
 external lock : words -> bool = "qr_lock"
 external base_addr : words -> nativeint = "qr_base_addr"
+external self_pid : unit -> int = "qr_getpid" [@@noalloc]
 external pid_alive : int -> bool = "qr_pid_alive" [@@noalloc]
 external session_lock : string -> int = "qr_session_lock"
 external session_unlock : int -> unit = "qr_session_unlock"
@@ -135,7 +136,8 @@ let write_descr t ~epoch ~generation =
   (* Release on magic publishes the descriptor. *)
   store_int m d_magic magic
 
-let create ?(name = "") ?(addr = 0n) ?(epoch = 1) ?(generation = 1) ~words () =
+let create_unlocked ?(name = "") ?(addr = 0n) ?(epoch = self_pid ())
+    ?(generation = 1) ~words () =
   if words < descr_words then Error Too_small
   else
     match map name words true addr with
@@ -144,6 +146,22 @@ let create ?(name = "") ?(addr = 0n) ?(epoch = 1) ?(generation = 1) ~words () =
         let t = { mem; locked = lock mem; cursor = descr_words } in
         write_descr t ~epoch ~generation;
         Ok t
+
+(* Named create holds the same lock as [recover] until the descriptor
+   (including this process's pid) is stored. Otherwise a peer can observe
+   magic 0 and unlink the object out from under a live creator. flock is
+   not recursive, so [recover] calls [create_unlocked] while it already
+   holds the lock. *)
+let create ?(name = "") ?(addr = 0n) ?(epoch = self_pid ()) ?(generation = 1)
+    ~words () =
+  if name = "" then create_unlocked ~name ~addr ~epoch ~generation ~words ()
+  else
+    let fd = session_lock name in
+    if fd < 0 then Error Map_failed
+    else
+      let result = create_unlocked ~name ~addr ~epoch ~generation ~words () in
+      session_unlock fd;
+      result
 
 let reject mem err =
   unmap_raw mem;
@@ -188,7 +206,8 @@ let recover ?(addr = 0n) ~name ~epoch ~words () =
          before the lock is dropped. *)
       let result =
         match attach ~name ~addr ~words () with
-        | Error Not_found -> create ~name ~addr ~epoch ~words ()
+        | Error Not_found ->
+            create_unlocked ~name ~addr ~epoch ~words ()
         | Error Uninitialized ->
             reclaim ~addr ~name ~epoch ~generation:1 ~words ()
         | Error (Bad_magic | Bad_version | Too_small | Size_mismatch) as e -> e

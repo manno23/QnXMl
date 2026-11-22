@@ -86,21 +86,30 @@ static value map_error(int err)
     return map_result(err, ba);
 }
 
-/* Touch every page now: faults happen at init, not at runtime.
-   The mapping is exactly [bytes] long; never walk past it (W1). */
-static void prefault(void *p, size_t bytes)
+/* Touch every page now so faults happen at init. Reads only on an
+   existing object: a read-modify-write can put back a byte a peer stored
+   between the load and the store. Write-touches are for a mapping this
+   call just created and still owns. Never walk past [bytes] (W1). */
+static void prefault(void *p, size_t bytes, int writable)
 {
     volatile char *c = (volatile char *)p;
     long pg = sysconf(_SC_PAGESIZE);
     size_t i;
+    volatile char sink = 0;
     if (pg <= 0) pg = 4096;
-    for (i = 0; i < bytes; i += (size_t)pg) c[i] = c[i];
-    if (bytes > 0) c[bytes - 1] = c[bytes - 1];
+    if (writable) {
+        for (i = 0; i < bytes; i += (size_t)pg) c[i] = c[i];
+        if (bytes > 0) c[bytes - 1] = c[bytes - 1];
+    } else {
+        for (i = 0; i < bytes; i += (size_t)pg) sink = c[i];
+        if (bytes > 0) sink = c[bytes - 1];
+        (void)sink;
+    }
 }
 
-static value finish_map(void *p, size_t bytes)
+static value finish_map(void *p, size_t bytes, int writable)
 {
-    prefault(p, bytes);
+    prefault(p, bytes, writable);
     value ba = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT,
                                   1, p, (intnat)(bytes / 8));
     return map_result(QR_OK, ba);
@@ -150,7 +159,7 @@ CAMLprim value qr_map(value vname, value vwords, value vcreate, value vaddr)
         }
         p = mmap(hint, bytes, PROT_READ | PROT_WRITE, flags, -1, 0);
         if (p == MAP_FAILED) CAMLreturn(map_error(QR_ERR_MMAP));
-        CAMLreturn(finish_map(p, bytes));
+        CAMLreturn(finish_map(p, bytes, 1));
     }
 
     name = String_val(vname);
@@ -196,7 +205,7 @@ CAMLprim value qr_map(value vname, value vwords, value vcreate, value vaddr)
     /* munmap is paired with the failure paths above; the success path
        hands the mapping to the Bigarray for the life of the region.
        qr_unmap releases it explicitly. */
-    CAMLreturn(finish_map(p, bytes));
+    CAMLreturn(finish_map(p, bytes, creating));
 }
 
 /* Drop a named object the caller has already decided is a dead session,
@@ -277,6 +286,12 @@ CAMLprim value qr_session_unlock(value vfd)
         close(fd);
     }
     return Val_unit;
+}
+
+CAMLprim value qr_getpid(value vunit)
+{
+    (void)vunit;
+    return Val_long((intnat)getpid());
 }
 
 CAMLprim value qr_pid_alive(value vpid)
@@ -429,8 +444,9 @@ CAMLprim value qr_merkle_init(value vba, value vleaves)
 {
     int64_t *a = (int64_t *)Caml_ba_data_val(vba);
     intnat leaves = Long_val(vleaves);
+    intnat dim = Caml_ba_array_val(vba)->dim[0];
     intnat i, n;
-    if (leaves <= 0) return Val_unit;
+    if (leaves <= 0 || leaves > dim / 2) return Val_unit;
     n = leaves * 2;
     for (i = 0; i < n; i++)
         __atomic_store_n(&a[i], 0, __ATOMIC_RELAXED);
@@ -456,9 +472,10 @@ CAMLprim value qr_merkle_update(value vba, value vleaves, value vj, value vval)
 {
     int64_t *a = (int64_t *)Caml_ba_data_val(vba);
     intnat leaves = Long_val(vleaves);
+    intnat dim = Caml_ba_array_val(vba)->dim[0];
     intnat j = Long_val(vj);
     intnat i;
-    if (leaves <= 0 || j < 0 || j >= leaves) return Val_unit;
+    if (leaves <= 0 || leaves > dim / 2 || j < 0 || j >= leaves) return Val_unit;
     i = leaves + j;
     if (i == 1) {
         __atomic_store_n(&a[1], mix64(Int64_val(vval)), __ATOMIC_RELEASE);

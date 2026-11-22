@@ -60,9 +60,11 @@ val create :
   ?name:string -> ?addr:nativeint -> ?epoch:int -> ?generation:int ->
   words:int -> unit -> (t, error) result
 (** [create ~words] maps a fresh region and writes the descriptor in
-    state [init]. An empty [name] is a private anonymous mapping. A
-    non-empty name is created with [O_CREAT|O_EXCL]: an existing object
-    yields [Error Exists] and is not resized. *)
+    state [init]. [epoch] defaults to this process's pid, so a later
+    [recover] can tell a live creator from a dead one. An empty [name] is
+    a private anonymous mapping. A non-empty name is created with
+    [O_CREAT|O_EXCL] while the session lock is held, and is not resized if
+    it already exists. *)
 
 val attach :
   name:string -> ?addr:nativeint -> words:int -> unit -> (t, error) result

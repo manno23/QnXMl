@@ -164,11 +164,13 @@ let allocation_budget () =
   in
   let msg = slice width and out = slice width in
   for i = 0 to width - 1 do Region.store_relaxed msg i i done;
+  let ring_failed = ref false in
   budget oh "Ring.push+pop" n (fun n ->
       for _ = 1 to n do
-        ignore (Ring.push ring msg);
-        ignore (Ring.pop ring out)
+        if not (Ring.push ring msg) then ring_failed := true;
+        if not (Ring.pop ring out) then ring_failed := true
       done);
+  check "ring budget ops succeeded" (not !ring_failed);
 
   let peers = 4 in
   let c0 =
@@ -225,11 +227,13 @@ let allocation_budget () =
     Array.init 16 (fun i -> (Int64.of_int i, Int64.of_int (1000 + i)))
   in
   Array.iter (fun (k, v) -> ignore (Pmap.set pm k v)) keys;
+  let set_failed = ref false in
   budget oh "Pmap.set" n (fun n ->
       for i = 1 to n do
         let k, v = keys.(i land 15) in
-        ignore (Pmap.set pm k v)
+        if Pmap.set pm k v <= 0 then set_failed := true
       done);
+  check "pmap budget sets succeeded" (not !set_failed);
   let k, v = keys.(3) in
   check "pmap warmed" (Pmap.find_eq pm k v);
   budget oh "Pmap.find" n (fun n ->
@@ -520,6 +524,7 @@ let () =
   check "window holds exactly retention versions" (Pmap.live_count m = 3);
   check "map correct after churn" (Pmap.find_eq m 49L 999L);
   check "early version retired" (not (Pmap.has_version m v1));
+  check "failure sentinel is not a version" (not (Pmap.has_version m (-1)));
   let tiny_cap = 2 in
   let tiny_arena =
     force "tiny pmap arena"
@@ -606,6 +611,36 @@ let () =
     (Merkle.verify ~leaf_value:424242L ~proof:p ~expected_root:(Merkle.root mk_a));
   check "proof rejects tampered leaf"
     (not (Merkle.verify ~leaf_value:424243L ~proof:p ~expected_root:(Merkle.root mk_a)));
+  check "proof rejects an out-of-range leaf" (Merkle.proof mk_a leaves = []);
+  check "merkle rejects an overflowing leaf count"
+    (match Merkle.init (force_region (Region.slice region 4)) ~leaves:max_int with
+     | Error Merkle.Bad_leaves -> true
+     | _ -> false);
+  check "arena rejects an overflowing node size"
+    (match
+       Arena.create (force_region (Region.slice region 8)) ~capacity:2
+         ~node_words:max_int
+     with
+     | Error Arena.Bad_size -> true
+     | _ -> false);
+  check "pmap rejects an overflowing retention"
+    (match
+       Pmap.create pa (force_region (Region.slice region 32)) ~retention:max_int
+     with
+     | Error Pmap.Bad_size -> true
+     | _ -> false);
+  check "vclock attach rejects an empty slice"
+    (match Vclock.attach (force_region (Region.slice region 0)) ~me:0 with
+     | Error Vclock.Bad_peers -> true
+     | _ -> false);
+  let epoch_name = shm "epoch" in
+  Region.unlink epoch_name;
+  let epoch_region =
+    force_region (Region.create ~name:epoch_name ~words:32 ())
+  in
+  check "default epoch is this process" (Region.epoch epoch_region = Unix.getpid ());
+  Region.unlink epoch_name;
+  Region.unlink (epoch_name ^ "_lk");
 
   allocation_budget ();
 
