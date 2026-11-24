@@ -1,6 +1,6 @@
 ---
 name: qnxml-design-review
-description: Find and verify solutions to QnXMl's OCaml/QNX substrate and VWC design, implementation, correctness, or defensive security gaps.
+description: Use when QnXMl's OCaml/QNX substrate or VWC design, implementation, correctness, or defensive security needs review.
 ---
 
 # QnXMl design review
